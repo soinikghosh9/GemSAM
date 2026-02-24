@@ -1,0 +1,28 @@
+# MedGamma Edge Requirements
+# For Raspberry Pi 5 + Hailo AI HAT+2 (Hailo-10H 40 TOPS)
+
+# Core ML
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.40.0
+accelerate>=0.27.0
+peft>=0.10.0
+
+# Quantization (for INT4 MedGemma)
+bitsandbytes>=0.42.0
+
+# Image processing
+Pillow>=10.0.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+
+# HuggingFace
+huggingface_hub>=0.20.0
+
+# Note: Hailo SDK must be installed separately from:
+# https://hailo.ai/developer-zone/
+#
+# The hailo-all package provides:
+# - hailo_platform (Python API)
+# - hailort (runtime)
+# - HailoRT PCIe driver

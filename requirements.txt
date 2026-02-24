@@ -1,0 +1,26 @@
+# Core AI Frameworks
+# Note: PyTorch Nightly (CUDA 12.1) is required. See README or setup.ps1.
+# pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu121 --force-reinstall
+
+# LLM & Quantization (MedGemma 4-bit)
+transformers>=4.40.0
+accelerate>=0.30.0
+bitsandbytes>=0.43.1
+peft
+pandas
+scipy
+pydicom
+
+# Vision & Segmentation (SAM 2)
+# We install SAM 2 directly from source
+git+https://github.com/facebookresearch/segment-anything-2.git
+hydra-core>=1.3.2
+iopath>=0.1.10
+opencv-python
+matplotlib
+
+# Utilities
+numpy<2.0.0
+pillow
+tqdm
+fpdf

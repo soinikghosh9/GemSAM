@@ -1,0 +1,24 @@
+{
+  "medgemma": {
+    "model_id": "google/medgemma-1.5-4b-it",
+    "adapter_path": "checkpoints/production\\medgemma\\final",
+    "trained": true
+  },
+  "sam2": {
+    "config": "sam2_hiera_t.yaml",
+    "checkpoint": "checkpoints/sam2_hiera_tiny.pt",
+    "adapter_path": "checkpoints/production\\sam2\\final",
+    "trained": true
+  },
+  "training_info": {
+    "date": "2026-02-22T08:55:20.163826",
+    "quick_mode": false,
+    "medgemma_epochs": {
+      "screening": 2,
+      "modality": 2,
+      "detection": 3,
+      "vqa": 2
+    },
+    "sam2_epochs": 5
+  }
+}

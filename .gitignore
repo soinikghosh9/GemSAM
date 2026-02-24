@@ -1,0 +1,61 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# ─── Virtual Environment ───
+venv/
+.venv/
+env/
+
+# ─── Medical Data & Datasets ───
+data/
+datasets/
+medical_data/
+*.dcm
+*.dicom
+*.csv
+*.jsonl
+cache/
+training_data/
+validation_data/
+test_data/
+
+# ─── Model Weights (too large for GitHub) ───
+# SAM2 base model (~155 MB)
+checkpoints/sam2_hiera_tiny.pt
+
+# LoRA adapters (~131 MB each, use Git LFS or HuggingFace Hub)
+checkpoints/production/medgemma/*/adapter_model.safetensors
+checkpoints/production/sam2/*/adapter_model.safetensors
+
+# Edge compiled models
+edge/models/*.hef
+edge/models/*.onnx
+edge/models/*.onnx.data
+
+# ─── Logs & Generated Output ───
+*.log
+hailort.log
+outputs/
+results/
+demo/examples/*_analyzed.*
+*_analyzed.*
+reports/
+visualizations/
+
+# ─── System & IDE ───
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Misc ───
+.dummy

@@ -1,0 +1,42 @@
+[
+  {
+    "stage": "screening",
+    "epochs_planned": 2,
+    "epochs_completed": 1,
+    "samples": 10928,
+    "avg_loss": 2.149644525606098,
+    "best_loss": 0.08766333228559234,
+    "early_stopped": true,
+    "timestamp": "2026-02-21T19:01:37.162690"
+  },
+  {
+    "stage": "modality",
+    "epochs_planned": 2,
+    "epochs_completed": 1,
+    "samples": 17529,
+    "avg_loss": 1.0726480587998595,
+    "best_loss": 2.1352459473907945,
+    "early_stopped": true,
+    "timestamp": "2026-02-21T19:28:10.010599"
+  },
+  {
+    "stage": "detection",
+    "epochs_planned": 3,
+    "epochs_completed": 1,
+    "samples": 11204,
+    "avg_loss": 0.3318698093820403,
+    "best_loss": 0.20362331873874306,
+    "early_stopped": true,
+    "timestamp": "2026-02-22T04:27:13.464110"
+  },
+  {
+    "stage": "vqa",
+    "epochs_planned": 2,
+    "epochs_completed": 1,
+    "samples": 11633,
+    "avg_loss": 1.3265436385315843,
+    "best_loss": 0.742017298899591,
+    "early_stopped": true,
+    "timestamp": "2026-02-22T08:53:54.573444"
+  }
+]
