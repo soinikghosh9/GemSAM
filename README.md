@@ -1,4 +1,4 @@
-# MedGamma: Multi-Agent Clinical AI System for Explainable Medical Image Analysis
+# GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis on Edge using MedGemma-1.5 and SAM2
 
 [![Kaggle Competition](https://img.shields.io/badge/Kaggle-MedGemma%20Impact%20Challenge-20BEFF)](https://www.kaggle.com/competitions/medgemma-impact-challenge)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -12,7 +12,7 @@
 
 ## Abstract
 
-**MedGamma** is a **multi-modal, multi-agent clinical AI system** that combines vision-language understanding with precise image segmentation for explainable medical image analysis. The system integrates **MedGemma 1.5** (a 4B parameter medical vision-language model) as the cognitive reasoning engine with **SAM 2** (Segment Anything Model 2) as the precise segmentation module, orchestrated through an agentic architecture that mimics clinical decision-making workflows.
+**GemSAM** is an **agentic framework** for explainable multi-modal medical image analysis that combines vision-language understanding with precise image segmentation. The system integrates **MedGemma 1.5** (a 4B parameter medical vision-language model) as the cognitive reasoning engine ("Brain") with **SAM 2** (Segment Anything Model 2) as the precise segmentation module ("Hands"), orchestrated through an agentic architecture that mimics clinical decision-making workflows.
 
 ### Key Features (v2.1)
 
@@ -105,6 +105,11 @@ wget -O checkpoints/sam2/sam2_hiera_tiny.pt https://dl.fbaipublicfiles.com/segme
 # Login to HuggingFace (required for MedGemma access)
 huggingface-cli login
 # Enter your HuggingFace token when prompted
+
+# OR set as environment variable (Recommended for development)
+export HF_TOKEN="your_token_here"  # Linux/Mac
+set HF_TOKEN="your_token_here"     # Windows (Command Prompt)
+$env:HF_TOKEN="your_token_here"    # Windows (PowerShell)
 ```
 
 ### Step 3: Dataset Preparation
