@@ -55,7 +55,7 @@ STAGE_CONFIGS = [
     },
     {
         "name": "detection",
-        "adapter_dir": "detection_best",  # Use best detection checkpoint
+        "adapter_dir": "final",  # User says final has lower loss
         "task": "detection",
         "dataset": "vindr",
         "split": "test",
@@ -92,12 +92,19 @@ class MultiStageEvaluator:
         for stage_config in STAGE_CONFIGS:
             stage_name = stage_config["name"]
 
-            # Check if task-specific adapter exists
+            # Check for adapter at top level first (new structure), then in medgemma/ subfolder
             adapter_path = os.path.join(
-                self.args.checkpoint, "medgemma", stage_config["adapter_dir"]
+                self.args.checkpoint, stage_config["adapter_dir"]
             )
-            if not os.path.exists(adapter_path):
-                print(f"\n[SKIP] Adapter not found for stage '{stage_name}': {adapter_path}")
+            
+            if not os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
+                # Try legacy/subfolder path
+                adapter_path = os.path.join(
+                    self.args.checkpoint, "medgemma", stage_config["adapter_dir"]
+                )
+
+            if not os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
+                print(f"\n[SKIP] Adapter not found for stage '{stage_name}' at: {adapter_path}")
                 self.results[stage_name] = {"status": "skipped", "reason": "adapter not found"}
                 continue
 

@@ -30,8 +30,7 @@ test_data/
 checkpoints/sam2_hiera_tiny.pt
 
 # LoRA adapters (~131 MB each, use Git LFS or HuggingFace Hub)
-checkpoints/production/medgemma/*/adapter_model.safetensors
-checkpoints/production/sam2/*/adapter_model.safetensors
+checkpoints/production/**/adapter_model.safetensors
 
 # Edge compiled models
 edge/models/*.hef
