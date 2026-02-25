@@ -13,9 +13,9 @@ venv/
 env/
 
 # ─── Medical Data & Datasets ───
-data/
-datasets/
-medical_data/
+/data/
+/datasets/
+/medical_data/
 *.dcm
 *.dicom
 *.csv
