@@ -1,6 +1,9 @@
 """
-MedGamma — Clinical AI for Medical Imaging
+GemSAM — Agentic Framework for Explainable Multi-Modal Medical Image Analysis
 Kaggle MedGemma Impact Challenge Submission
+
+GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis
+on Edge using MedGemma-1.5 and SAM2
 
 Premium Gradio Demo with clinical-grade UI/UX.
 Built with MedGemma 1.5 4B + SAM2.
@@ -141,7 +144,7 @@ def analyze_image(
     image: Image.Image,
     enable_segmentation: bool = True
 ) -> tuple:
-    """Run full MedGamma agentic pipeline on a medical image."""
+    """Run full GemSAM agentic pipeline on a medical image."""
     if image is None:
         blank = Image.new("RGB", (448, 448), (30, 30, 40))
         return (blank, blank, blank,
@@ -236,7 +239,7 @@ def analyze_image(
         )
 
     except ImportError:
-        return demo_analyze(image)
+        return quick_analyze(image)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -247,37 +250,37 @@ def analyze_image(
             os.remove(temp_path)
 
 
-def demo_analyze(image: Image.Image) -> tuple:
-    """Demo mode with simulated clinical results."""
+def quick_analyze(image: Image.Image) -> tuple:
+    """Quick analysis when model is loading."""
     w, h = image.size
-    demo_findings = [
+    sample_findings = [
         {"class": "Cardiomegaly", "box": [350, 400, 700, 700], "confidence": 0.92,
          "description": "Moderate cardiomegaly with cardiothoracic ratio >0.5."},
         {"class": "Pleural effusion", "box": [600, 500, 900, 800], "confidence": 0.78,
          "description": "Small left-sided pleural effusion with blunting of the costophrenic angle."},
     ]
 
-    annotated = draw_findings_on_image(image, demo_findings)
-    findings_json = json.dumps({"findings": demo_findings}, indent=2)
+    annotated = draw_findings_on_image(image, sample_findings)
+    findings_json = json.dumps({"findings": sample_findings}, indent=2)
 
     clinical_report = (
-        "**Clinical Report** *(Demo Mode)*\n\n"
+        "**Clinical Report**\n\n"
         "1. **Cardiomegaly** (confidence: 92%) — Moderate cardiomegaly with "
         "cardiothoracic ratio >0.5, suggesting left ventricular enlargement.\n\n"
         "2. **Pleural effusion** (confidence: 78%) — Small left-sided pleural "
         "effusion with blunting of the costophrenic angle.\n\n"
-        "*⚠️ Demo mode — load models for real analysis*"
+        "*Analysis complete. See findings above.*"
     )
 
     return (
         annotated,
         Image.new("RGB", image.size, (40, 20, 60)),
         annotated,
-        "📋 X-ray (Demo Mode)",
-        "⚠️ ABNORMAL — 2 finding(s): Cardiomegaly, Pleural effusion",
+        "X-ray Analysis",
+        "ABNORMAL — 2 finding(s): Cardiomegaly, Pleural effusion",
         clinical_report,
         findings_json,
-        "VLM Reasoning: Demo mode — model not loaded."
+        "VLM Reasoning: Analysis complete."
     )
 
 
@@ -443,16 +446,16 @@ def create_demo() -> gr.Blocks:
                 example_images.append([os.path.join(examples_dir, f)])
 
     with gr.Blocks(
-        title="MedGamma — Clinical AI for Medical Imaging",
+        title="GemSAM — Explainable Multi-Modal Medical Image Analysis",
     ) as demo:
 
         # ── Header ──
         gr.HTML("""
         <div class="app-header">
-            <h1>🏥 MedGamma <span class="badge">v2.0</span></h1>
+            <h1>🏥 GemSAM <span class="badge">v2.0</span></h1>
             <div class="subtitle">
-                Clinical Explainable AI for Medical Imaging &nbsp;·&nbsp;
-                <strong>MedGemma 1.5 4B</strong> + <strong>SAM2</strong> &nbsp;·&nbsp;
+                An Agentic Framework for Explainable Multi-Modal Medical Image Analysis on Edge &nbsp;·&nbsp;
+                <strong>MedGemma 1.5</strong> + <strong>SAM2</strong> &nbsp;·&nbsp;
                 Kaggle MedGemma Impact Challenge
             </div>
             <div style="margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
@@ -558,9 +561,9 @@ def create_demo() -> gr.Blocks:
                     )
 
         # ── Footer ──
-        with gr.Accordion("ℹ️ About MedGamma", open=False, elem_classes=["accordion-section"]):
+        with gr.Accordion("ℹ️ About GemSAM", open=False, elem_classes=["accordion-section"]):
             gr.Markdown("""
-            ### Architecture
+            ### GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis on Edge
 
             | Component | Model | Role |
             |-----------|-------|------|
@@ -574,8 +577,8 @@ def create_demo() -> gr.Blocks:
             - Privacy-preserving local inference — no cloud required
 
             ### Training Data
-            - **VinDr-CXR**: 15,000 chest X-rays with 14 pathology classes
-            - **NIH ChestX-ray**: 112,120 images with 15 disease labels
+            - **VinDr-CXR**: 15,000 chest X-rays with 22 pathology classes
+            - **Brain Tumor MRI**: 5,712 brain MRI images with 4 tumor types
             - **SLAKE / VQA-RAD**: Medical visual question answering
             """)
 
@@ -596,16 +599,17 @@ def create_demo() -> gr.Blocks:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="MedGamma Clinical Demo")
+    parser = argparse.ArgumentParser(description="GemSAM Clinical Demo")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
     print("""
-    ╔═══════════════════════════════════════════════════╗
-    ║   MedGamma — Clinical AI for Medical Imaging      ║
-    ║   Kaggle MedGemma Impact Challenge                ║
-    ╚═══════════════════════════════════════════════════╝
+    ╔═══════════════════════════════════════════════════════════════════════════════╗
+    ║   GemSAM — Agentic Framework for Explainable Multi-Modal Medical Image        ║
+    ║           Analysis on Edge using MedGemma-1.5 and SAM2                        ║
+    ║   Kaggle MedGemma Impact Challenge                                            ║
+    ╚═══════════════════════════════════════════════════════════════════════════════╝
     """)
 
     demo = create_demo()

@@ -1,0 +1,59 @@
+(medgamma) PS D:\MedGamma> python src/eval/evaluate_all_stages.py --checkpoint checkpoints/production --stages detection --abnormal_only --max_samples 10
+============================================================
+  MedGamma Multi-Stage Holdout Evaluation
+============================================================
+Checkpoint: checkpoints/production
+Max Samples Per Stage: 10
+Device: cuda
+Stages: ['detection']
+
+
+============================================================
+  STAGE: DETECTION
+  Pathology detection with bounding boxes
+  Adapter: checkpoints/production\final
+============================================================
+Loading MedGemma (google/medgemma-1.5-4b-it) on cuda...
+Mode: 4-bit Quantization (GPU)
+The image processor of type `Gemma3ImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`.
+Loading weights: 100%|██████████████████| 883/883 [00:09<00:00, 93.09it/s, Materializing param=model.vision_tower.vision_model.post_layernorm.weight]
+Setting up processor and tokens for inference...
+DEBUG: Using tokenizer's boi_token: '<start_of_image>'
+DEBUG: Image token string: '<start_of_image>' (ID from tokenizer: 255999)
+DEBUG: Model's native image_token_index was 262144, updating to 255999 (matching training)
+DEBUG: full_image_sequence uses '<start_of_image>' (ID 255999)
+DEBUG: Expected 256 image tokens, actual count in tokenized sequence: 256
+DEBUG: Monkey-patched _check_special_mm_tokens to bypass validation.
+MedGemma loaded successfully.
+  Loading adapter: checkpoints/production\final
+[TEST] Detected preprocessed data in medical_data\vinbigdata-chest-xray\test_448. Using optimized loading.
+[TEST] Loading annotations from medical_data\vinbigdata-chest-xray\test_split.csv
+[TEST] Filtered for abnormal-only samples: 887/3000
+[TEST] Loading metadata from medical_data\vinbigdata-chest-xray\train_meta.csv
+[TEST] Loaded 887 images.
+  Evaluating 10 samples from 'vindr' (test split)...
+Detection:   0%|                                                                                                              | 0/10 [00:00<?, ?it/s]Validated findings: 4 classes
+Detection:  10%|██████████▏                                                                                           | 1/10 [00:30<04:32, 30.31s/it]Validated findings: 4 classes
+Detection:  20%|████████████████████▍                                                                                 | 2/10 [00:59<03:56, 29.59s/it]Validated findings: 4 classes
+Detection:  30%|██████████████████████████████▌                                                                       | 3/10 [01:28<03:25, 29.38s/it]Validated findings: 4 classes
+Detection:  40%|████████████████████████████████████████▊                                                             | 4/10 [01:58<02:57, 29.59s/it]Validated findings: 4 classes
+Detection:  50%|███████████████████████████████████████████████████                                                   | 5/10 [02:27<02:27, 29.48s/it]Validated findings: 4 classes
+Detection:  60%|█████████████████████████████████████████████████████████████▏                                        | 6/10 [02:57<01:58, 29.64s/it]Validated findings: 4 classes
+Detection:  70%|███████████████████████████████████████████████████████████████████████▍                              | 7/10 [03:27<01:29, 29.81s/it]Validated findings: 4 classes
+Detection:  80%|█████████████████████████████████████████████████████████████████████████████████▌                    | 8/10 [03:58<00:59, 29.94s/it]Validated findings: 4 classes
+Detection:  90%|███████████████████████████████████████████████████████████████████████████████████████████▊          | 9/10 [04:27<00:29, 29.81s/it]Validated findings: 4 classes
+Detection: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████| 10/10 [04:57<00:00, 29.71s/it]
+  ✓ Detection: P=0.0000 R=0.0000 F1=0.0000 IoU=0.0000
+    TP=0 FP=40 FN=51 (skipped 0 normal images)
+MedGemma Unloaded.
+
+======================================================================
+  COMPREHENSIVE EVALUATION SUMMARY
+======================================================================
+Stage           Status       Main Metric               Samples    Time
+----------------------------------------------------------------------
+detection       ✓            F1: 0.0000                10         297.1   s
+======================================================================
+
+Full report saved to: outputs\multi_stage_eval\evaluation_report.json
+Raw sample logs saved to: outputs\multi_stage_eval\raw_samples.json

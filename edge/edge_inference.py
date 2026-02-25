@@ -1,5 +1,8 @@
 """
-MedGamma Edge Inference for Raspberry Pi 5 + Hailo AI HAT+2.
+GemSAM Edge Inference for Raspberry Pi 5 + Hailo AI HAT+2.
+
+GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis
+on Edge using MedGemma-1.5 and SAM2
 
 Optimized for:
 - Raspberry Pi 5 (8GB RAM)
@@ -27,7 +30,6 @@ from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 
 import numpy as np
-import gc
 from PIL import Image
 
 # Conditional imports for edge vs development
@@ -37,8 +39,7 @@ if RUNNING_ON_EDGE:
     try:
         from hailo_platform import (
             VDevice, HailoStreamInterface, ConfigureParams,
-            InferVStreams, InputVStreamParams, OutputVStreamParams,
-            HEF, HailoSchedulingAlgorithm
+            InferVStreams, InputVStreamParams, OutputVStreamParams
         )
         HAILO_AVAILABLE = True
     except ImportError:
@@ -90,19 +91,24 @@ class HailoSAM2Runner:
     def _initialize_hailo(self):
         """Initialize Hailo device and load model."""
         try:
-            # Create virtual device with scheduler
-            params = VDevice.create_params()
-            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-            self.device = VDevice(params)
+            # Create virtual device
+            self.device = VDevice()
 
-            # Create infer model
-            self.infer_model = self.device.create_infer_model(self.hef_path)
-            
-            # Configure model
-            self.configured_model = self.infer_model.configure()
-            
+            # Configure network
+            hef = self.device.create_hef(self.hef_path)
+            configure_params = ConfigureParams.create_from_hef(hef)
+            self.network_group = self.device.configure(hef, configure_params)[0]
+
+            # Create stream parameters
+            self.input_vstream_params = InputVStreamParams.make_from_network_group(
+                self.network_group, quantized=False
+            )
+            self.output_vstream_params = OutputVStreamParams.make_from_network_group(
+                self.network_group, quantized=False
+            )
+
             print(f"Hailo-10H initialized with {self.hef_path}")
-            print(f"  Model: {self.hef_path}")
+            print(f"  Network: {self.network_group.name}")
 
         except Exception as e:
             print(f"Failed to initialize Hailo: {e}")
@@ -123,23 +129,20 @@ class HailoSAM2Runner:
 
         start = time.time()
 
-        # Run inference using InferModel API
-        with self.configured_model as model:
-            bindings = model.create_bindings()
-            bindings.input().set_buffer(image.astype(np.float32))
-            
-            # Assuming single output named 'output' or first output
-            output_name = self.infer_model.output_names[0]
-            output_buffer = np.empty(self.infer_model.output(output_name).shape, dtype=np.float32)
-            bindings.output(output_name).set_buffer(output_buffer)
-            
-            job = model.run(bindings)
-            job.wait(10000)
-            
+        with InferVStreams(
+            self.network_group,
+            self.input_vstream_params,
+            self.output_vstream_params
+        ) as infer_pipeline:
+            # Run inference
+            output = infer_pipeline.infer({
+                "input": image.astype(np.float32)
+            })
+
         elapsed_ms = (time.time() - start) * 1000
         print(f"  Hailo encoder: {elapsed_ms:.1f}ms")
 
-        return output_buffer
+        return output["output"]
 
     def _cpu_fallback_encode(self, image: np.ndarray) -> np.ndarray:
         """CPU fallback when Hailo is unavailable."""
@@ -207,101 +210,71 @@ class EdgeMedGemmaRunner:
     """
     MedGemma inference on Raspberry Pi 5 CPU.
 
-    Uses FP16 precision for memory efficiency on ARM CPU.
-    NOTE: bitsandbytes INT4 quantization requires CUDA and CANNOT work
-    on ARM CPU — it will silently hang. We use torch.float16 instead.
-
-    Expected: ~4 GB RAM, ~60-120s per inference on RPi5.
+    Uses INT4 quantization for memory efficiency.
+    Expected inference time: ~30-60 seconds per image.
     """
 
     def __init__(
         self,
         checkpoint_dir: str = "checkpoints/production",
+        quantize: bool = True
     ):
         """
         Initialize MedGemma for edge inference.
 
         Args:
             checkpoint_dir: Path to trained checkpoints
+            quantize: Use INT4 quantization (recommended for RPi5)
         """
         self.checkpoint_dir = checkpoint_dir
+        self.quantize = quantize
         self.model = None
         self.processor = None
+
+        # Lazy loading to save memory
         self._loaded = False
 
-    @staticmethod
-    def _check_system_memory():
-        """Print system memory diagnostics. Warn if likely to OOM."""
-        try:
-            with open("/proc/meminfo", "r") as f:
-                meminfo = {}
-                for line in f:
-                    parts = line.split()
-                    meminfo[parts[0].rstrip(":")] = int(parts[1])  # kB
-
-            total_gb = meminfo.get("MemTotal", 0) / 1024 / 1024
-            avail_gb = meminfo.get("MemAvailable", 0) / 1024 / 1024
-            swap_gb  = meminfo.get("SwapTotal", 0) / 1024 / 1024
-
-            print(f"  System RAM : {total_gb:.1f} GB total, {avail_gb:.1f} GB available")
-            print(f"  Swap       : {swap_gb:.1f} GB")
-
-            if avail_gb < 4.0:
-                print("  ⚠  WARNING: Less than 4 GB RAM available!")
-                print("     Close browsers/apps to free memory.")
-            if swap_gb < 2.0:
-                print("  ⚠  WARNING: Swap is < 2 GB. Strongly recommend >= 4 GB swap.")
-                print("     Fix: sudo dphys-swapfile swapoff")
-                print("           sudo sed -i 's/CONF_SWAPSIZE=.*/CONF_SWAPSIZE=4096/' /etc/dphys-swapfile")
-                print("           sudo dphys-swapfile setup && sudo dphys-swapfile swapon")
-        except FileNotFoundError:
-            print("  (Not running on Linux — memory check skipped)")
-
     def _load_model(self):
-        """Load model in FP16 on CPU (ARM-compatible, no CUDA needed)."""
+        """Load model with INT4 quantization."""
         if self._loaded:
             return
 
-        print("Loading MedGemma (FP16) on CPU...")
-        self._check_system_memory()
+        print("Loading MedGemma (INT4 quantized) on CPU...")
         start = time.time()
 
         try:
             import torch
-            from transformers import AutoModelForImageTextToText, AutoProcessor
-
-            model_id = "/media/ai-pi/One Touch1/huggingface_cache/hub/models--google--medgemma-1.5-4b-it/snapshots/e9792da5fb8ee651083d345ec4bce07c3c9f1641"
-
-            # ── Processor (lightweight) ──
-            self.processor = AutoProcessor.from_pretrained(
-                model_id, trust_remote_code=True
+            from transformers import (
+                AutoModelForImageTextToText,
+                AutoProcessor,
+                BitsAndBytesConfig
             )
 
-            # ── Model (FP16, ~4 GB) ──
-            # IMPORTANT: Do NOT use BitsAndBytesConfig here.
-            # bitsandbytes requires CUDA and will hang/crash on ARM CPU.
+            model_id = "google/medgemma-1.5-4b-it"
+
+            # INT4 quantization for memory efficiency
+            if self.quantize:
+                quant_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4"
+                )
+            else:
+                quant_config = None
+
+            self.processor = AutoProcessor.from_pretrained(model_id)
+
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_id,
-                torch_dtype=torch.float16,   # Half-precision: ~4 GB vs ~8 GB FP32
-                device_map="cpu",
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,       # Load shard-by-shard, don't double memory
+                quantization_config=quant_config,
+                device_map="cpu",  # Force CPU on Raspberry Pi
+                low_cpu_mem_usage=True
             )
 
-            # ── LoRA adapter (tiny, ~30 MB) ──
-            adapter_paths = [
-                os.path.join(self.checkpoint_dir, "medgemma", "detection_best"),
-                os.path.join(self.checkpoint_dir, "medgemma", "detection"),
-                os.path.join(self.checkpoint_dir, "medgemma", "final"),
-            ]
-
-            adapter_path = None
-            for path in adapter_paths:
-                if os.path.exists(os.path.join(path, "adapter_config.json")):
-                    adapter_path = path
-                    break
-
-            if adapter_path:
+            # Load LoRA adapter if available
+            adapter_path = os.path.join(self.checkpoint_dir, "medgemma", "detection")
+            if os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
                 from peft import PeftModel
                 self.model = PeftModel.from_pretrained(self.model, adapter_path)
                 print(f"  Loaded LoRA adapter from {adapter_path}")
@@ -309,32 +282,13 @@ class EdgeMedGemmaRunner:
             self.model.eval()
             self._loaded = True
 
-            # Free any leftover allocation buffers
-            gc.collect()
-
             elapsed = time.time() - start
-            print(f"  ✓ Model loaded in {elapsed:.1f}s")
-            self._check_system_memory()  # Show post-load memory
+            print(f"  Model loaded in {elapsed:.1f}s")
+            print(f"  Memory usage: ~2GB")
 
         except Exception as e:
-            print(f"\n✗ Failed to load MedGemma: {e}")
-            print("  Possible causes:")
-            print("    1. Not enough RAM — ensure swap >= 4 GB")
-            print("    2. Model files missing — check HF_HOME path")
-            print("    3. Corrupted download — delete cache and re-download")
+            print(f"Failed to load MedGemma: {e}")
             raise
-
-    def unload_model(self):
-        """Explicitly free model memory (call before SAM2 if RAM is tight)."""
-        if self.model is not None:
-            del self.model
-            self.model = None
-        if self.processor is not None:
-            del self.processor
-            self.processor = None
-        self._loaded = False
-        gc.collect()
-        print("  MedGemma unloaded — RAM freed for next stage.")
 
     def analyze(
         self,
@@ -361,59 +315,36 @@ class EdgeMedGemmaRunner:
 
         # Build prompt based on task
         if task == "screening":
-            task_prompt = (
+            prompt = (
                 "Is this medical image showing signs of disease? "
                 "Respond with 'HEALTHY' or 'ABNORMAL' with reasoning."
             )
         elif task == "detection":
-            task_prompt = (
+            prompt = (
                 "Analyze this medical image for pathological findings. "
                 "For each finding, provide the class name and bounding box. "
                 'Output JSON: {"findings": [{"class": "...", "box": [x1,y1,x2,y2]}]}'
             )
         else:
-            task_prompt = "What imaging modality is this? (X-ray, CT, MRI, Ultrasound)"
+            prompt = "What imaging modality is this? (X-ray, CT, MRI, Ultrasound)"
 
-        # Use chat template for correct formatting (instruct turns + image tokens)
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": task_prompt}
-                ]
-            }
-        ]
-        prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        # Note: apply_chat_template might add a BOS token, so we set add_special_tokens=False in processor call if needed
-        # but processor() usually handles it.
-
-        # Process inputs — use FP16 to match model dtype
-        import torch
+        # Process inputs
         inputs = self.processor(
             text=prompt,
             images=image,
             return_tensors="pt"
         )
-        # Cast pixel_values to float16 to match model weights
-        if "pixel_values" in inputs:
-            inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
 
-        # Token budget: detection JSON is compact; screening/modality even shorter
-        max_tokens = 150 if task == "detection" else 50
-
+        # Generate
+        import torch
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=False,
+                max_new_tokens=256,
+                do_sample=False
             )
 
         response = self.processor.decode(outputs[0], skip_special_tokens=True)
-
-        # Aggressively free tensors
-        del inputs, outputs
-        gc.collect()
 
         elapsed = time.time() - start
         print(f"  Inference time: {elapsed:.1f}s")
@@ -425,9 +356,12 @@ class EdgeMedGemmaRunner:
         }
 
 
-class MedGammaEdgePipeline:
+class GemSAMEdgePipeline:
     """
-    Complete MedGamma pipeline for Raspberry Pi 5 + Hailo-10H.
+    Complete GemSAM pipeline for Raspberry Pi 5 + Hailo-10H.
+
+    GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis
+    on Edge using MedGemma-1.5 and SAM2
 
     Combines:
     - MedGemma (CPU): Reasoning and detection
@@ -448,11 +382,8 @@ class MedGammaEdgePipeline:
             checkpoint_dir: Path to trained model checkpoints
             hailo_hef: Path to Hailo HEF file for SAM2
         """
-        # Initialize lazily — don't allocate both at once on 8 GB system
-        self._checkpoint_dir = checkpoint_dir
-        self._hailo_hef = hailo_hef
-        self.medgemma = None
-        self.sam2 = None
+        self.medgemma = EdgeMedGemmaRunner(checkpoint_dir)
+        self.sam2 = HailoSAM2Runner(hailo_hef)
 
         # Device info
         self.device_info = self._get_device_info()
@@ -513,30 +444,22 @@ class MedGammaEdgePipeline:
         )
 
         try:
-            # ── Step 1: Load MedGemma and run detection ──
-            print("\n[1/2] Loading MedGemma and analyzing image...")
-            self.medgemma = EdgeMedGemmaRunner(self._checkpoint_dir)
+            # Step 1: Modality detection (optional, fast)
+            print("\n[1/3] Detecting modality...")
+            modality_result = self.medgemma.analyze(image_path, task="modality")
+            result.modality = self._parse_modality(modality_result["response"])
 
-            # Single combined pass: detect modality AND findings in one prompt
+            # Step 2: Detection (main analysis)
+            print("\n[2/3] Detecting abnormalities...")
             detection_result = self.medgemma.analyze(image_path, task="detection")
             findings = self._parse_findings(detection_result["response"])
-            result.modality = self._guess_modality_from_prompt(detection_result["response"])
             result.findings = findings
             result.is_abnormal = len(findings) > 0
-            result.confidence = max(
-                [f.get("confidence", 0.7) for f in findings], default=0.0
-            )
+            result.confidence = max([f.get("confidence", 0.7) for f in findings], default=0.0)
 
-            # FREE MedGemma before loading SAM2 — cannot hold both in 8 GB
-            print("  Unloading MedGemma to free RAM for SAM2...")
-            self.medgemma.unload_model()
-            self.medgemma = None
-            gc.collect()
-
-            # ── Step 2: Segmentation (if findings detected) ──
+            # Step 3: Segmentation (if findings detected)
             if findings and task in ["full", "segment"]:
-                print("\n[2/2] Segmenting regions (Hailo-10H)...")
-                self.sam2 = HailoSAM2Runner(self._hailo_hef)
+                print("\n[3/3] Segmenting regions (Hailo-10H)...")
                 image = np.array(Image.open(image_path).convert("RGB"))
 
                 for finding in findings:
@@ -546,30 +469,24 @@ class MedGammaEdgePipeline:
                         result.segmentation_masks.append(mask)
                         finding["iou_score"] = score
 
-                # Free SAM2 as well
-                self.sam2 = None
-                gc.collect()
-            else:
-                print("\n[2/2] No findings — skipping segmentation.")
-
         except Exception as e:
-            print(f"\n✗ Error during analysis: {e}")
+            print(f"Error during analysis: {e}")
             import traceback
             traceback.print_exc()
 
         result.inference_time_ms = (time.time() - start) * 1000
         return result
 
-    def _guess_modality_from_prompt(self, response: str) -> str:
-        """Best-effort modality detection from the detection response text."""
-        r = response.lower()
-        if "x-ray" in r or "xray" in r or "chest" in r or "cxr" in r or "radiograph" in r:
+    def _parse_modality(self, response: str) -> str:
+        """Parse modality from response."""
+        response_lower = response.lower()
+        if "x-ray" in response_lower or "xray" in response_lower:
             return "xray"
-        elif "ct" in r or "computed tomography" in r:
+        elif "ct" in response_lower:
             return "ct"
-        elif "mri" in r or "magnetic resonance" in r:
+        elif "mri" in response_lower:
             return "mri"
-        elif "ultrasound" in r or "sonograph" in r:
+        elif "ultrasound" in response_lower:
             return "ultrasound"
         return "unknown"
 
@@ -591,7 +508,7 @@ class MedGammaEdgePipeline:
     def print_results(self, result: EdgeInferenceResult):
         """Print formatted results."""
         print("\n" + "="*60)
-        print("MedGamma Edge Analysis Results")
+        print("GemSAM Edge Analysis Results")
         print("="*60)
         print(f"Image: {result.image_path}")
         print(f"Modality: {result.modality}")
@@ -619,28 +536,27 @@ class MedGammaEdgePipeline:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MedGamma Edge Inference (Raspberry Pi 5 + Hailo-10H)"
+        description="GemSAM Edge Inference (Raspberry Pi 5 + Hailo-10H)"
     )
     parser.add_argument("--image", "-i", required=True, help="Path to medical image")
     parser.add_argument("--task", "-t", choices=["full", "screen", "detect", "segment"],
                         default="full", help="Analysis task")
-    parser.add_argument("--checkpoint", "-c", 
-                        default="checkpoints/production/medgemma/detection_best",
+    parser.add_argument("--checkpoint", "-c", default="checkpoints/production",
                         help="Checkpoint directory")
-    parser.add_argument("--hailo-hef", default="edge/models/hailo_encoder.hef",
+    parser.add_argument("--hailo-hef", default="models/sam2_encoder_hailo10h.hef",
                         help="Path to Hailo HEF file")
 
     args = parser.parse_args()
 
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║          MedGamma Edge Inference                             ║
+║          GemSAM Edge Inference                             ║
 ║          Raspberry Pi 5 + Hailo-10H (40 TOPS)                ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
 
     # Initialize pipeline
-    pipeline = MedGammaEdgePipeline(
+    pipeline = GemSAMEdgePipeline(
         checkpoint_dir=args.checkpoint,
         hailo_hef=args.hailo_hef
     )
@@ -650,6 +566,10 @@ def main():
 
     # Print results
     pipeline.print_results(result)
+
+
+# Backward compatibility alias
+MedGammaEdgePipeline = GemSAMEdgePipeline
 
 
 if __name__ == "__main__":

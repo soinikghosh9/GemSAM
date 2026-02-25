@@ -1,5 +1,8 @@
 """
-Clinical Orchestrator - MedGemma + SAM2 Integration
+GemSAM Orchestrator - MedGemma + SAM2 Integration
+
+GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis
+on Edge using MedGemma-1.5 and SAM2
 
 Coordinates the multi-stage clinical AI pipeline:
 1. Knowledge Retrieval - Context from clinical guidelines
@@ -22,23 +25,38 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-from .config import Config
-from .medgemma_wrapper import MedGemmaWrapper
-from .medsam_wrapper import MedSAMWrapper
-from .agent_state import AgentState
-from .knowledge_base import ClinicalKnowledgeBase
-from .explainability import MedGemmaExplainer
+try:
+    from .config import Config
+    from .medgemma_wrapper import MedGemmaWrapper
+    from .medsam_wrapper import MedSAMWrapper
+    from .agent_state import AgentState
+    from .knowledge_base import ClinicalKnowledgeBase
+    from .explainability import MedGemmaExplainer
+except (ImportError, ValueError):
+    from config import Config
+    from medgemma_wrapper import MedGemmaWrapper
+    from medsam_wrapper import MedSAMWrapper
+    from agent_state import AgentState
+    from knowledge_base import ClinicalKnowledgeBase
+    from explainability import MedGemmaExplainer
 from peft import PeftModel
 from PIL import Image
 import time
 
 # Import clinical intelligence for robust analysis
 try:
-    from .clinical_intelligence import (
-        ClinicalIntelligence,
-        ImageQualityAssessor,
-        ConfidenceLevel,
-    )
+    try:
+        from .clinical_intelligence import (
+            ClinicalIntelligence,
+            ImageQualityAssessor,
+            ConfidenceLevel,
+        )
+    except (ImportError, ValueError):
+        from clinical_intelligence import (
+            ClinicalIntelligence,
+            ImageQualityAssessor,
+            ConfidenceLevel,
+        )
     CLINICAL_INTELLIGENCE_AVAILABLE = True
 except ImportError:
     CLINICAL_INTELLIGENCE_AVAILABLE = False
@@ -54,9 +72,12 @@ if sys.stdout.encoding != 'utf-8':
         sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
 
 
-class ClinicalOrchestrator:
+class GemSAMOrchestrator:
     """
-    Orchestrates MedGemma (reasoning) + SAM2 (segmentation) for clinical image analysis.
+    GemSAM Orchestrator - MedGemma (reasoning) + SAM2 (segmentation) for clinical image analysis.
+
+    GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis
+    on Edge using MedGemma-1.5 and SAM2
 
     Supports trained checkpoints from:
     - checkpoints/production/medgemma/final (MedGemma LoRA adapter)
@@ -65,13 +86,13 @@ class ClinicalOrchestrator:
 
     def __init__(self, checkpoint_dir: str = None):
         """
-        Initialize the clinical orchestrator.
+        Initialize the GemSAM orchestrator.
 
         Args:
             checkpoint_dir: Path to trained checkpoints (e.g., "checkpoints/production").
                           If None, will search default locations.
         """
-        print("Initializing Clinical Orchestrator...")
+        print("Initializing GemSAM Orchestrator...")
 
         self.checkpoint_dir = checkpoint_dir
         self.medgemma_adapter_path = None
@@ -140,6 +161,13 @@ class ClinicalOrchestrator:
             medgemma_paths = [
                 # Best detection checkpoint (primary)
                 os.path.join(base_path, "medgemma", "detection_best"),
+                # Fallback to recent checkpoints
+                os.path.join(base_path, "medgemma", "detection_checkpoint_e1_b5000"),
+                os.path.join(base_path, "medgemma", "detection_checkpoint_e1_b4500"),
+                os.path.join(base_path, "medgemma", "detection_checkpoint_e1_b4000"),
+                os.path.join(base_path, "medgemma", "detection_checkpoint_e1_b3500"),
+                os.path.join(base_path, "medgemma", "detection_checkpoint_e1_b3000"),
+                os.path.join(base_path, "medgemma", "detection_checkpoint_e1_b2500"),
                 # Legacy detection path
                 os.path.join(base_path, "medgemma", "detection"),
                 # Final only if no detection adapter exists
@@ -201,7 +229,7 @@ class ClinicalOrchestrator:
             return state
 
         print(f"\n{'='*60}")
-        print(f"MEDGAMMA CLINICAL AI PIPELINE v2.0")
+        print(f"GEMSAM CLINICAL AI PIPELINE v2.0")
         print(f"{'='*60}")
         print(f"Query: {clinical_query}")
 
@@ -232,6 +260,17 @@ class ClinicalOrchestrator:
                         self.medgemma.model,
                         self.medgemma_adapter_path
                     )
+                    
+                    # CRITICAL FIX: Ensure LoRA weights are moved to GPU
+                    try:
+                        import torch
+                        device = getattr(self.medgemma.model, 'device', torch.device('cuda:0'))
+                        for name, param in self.medgemma.model.named_parameters():
+                            if param.device.type == 'cpu':
+                                param.data = param.data.to(device)
+                    except Exception as e:
+                        print(f"    Warning during device sync: {e}")
+                        
                     self.medgemma.model.eval()  # Critical: Set to eval mode
                     print("  > LoRA Adapter Loaded Successfully. Model in eval mode.")
                 except Exception as e:
@@ -289,26 +328,24 @@ class ClinicalOrchestrator:
             # --- Node 2: Modality-Specific Detection (MedGemma) ---
             print(f"\n[Node 2: {modality_display} Detection]")
 
-            # Use task-specific inference with MODALITY-AWARE prompt
-            # This is the KEY FIX - pass modality to get correct detection prompt
-            response_text, _ = self.medgemma.analyze_image(
+            # 1. Run inference and get reasoned response
+            response_text, vlm_findings = self.medgemma.analyze_image(
                 image_path,
                 query=clinical_query,
                 task="detection",
-                modality=state["modality"]  # Pass detected modality from state
+                modality=state["modality"],
+                include_reasoning=False  # CRITICAL: Appending text to the prompt breaks the LoRA adapter
             )
-
-            # Store the prompt for explainability (used later)
-            system_prompt = clinical_query
-            
-            state["current_thought"] = response_text
             state["messages"].append({"role": "assistant", "content": response_text})
             
-            # NOTE: We deliberately IGNORE parsed_boxes from MedGemma.
-            # Raw text-based bounding boxes are imprecise. We will calculate them from the heatmap instead.
-            print(f"  > Clinical Reasoning: {response_text[:100]}...")
+            # 2. Extract MedGemma's predicted boxes (Normalized 0-1000)
+            # These are critical for guiding Heatmap localization
+            # vlm_findings is already returned by analyze_image, no need to re-extract
+            print(f"  > Clinical Reasoning: {response_text[:120]}...")
+            print(f"  > VLM Findings: {len(vlm_findings)} identified")
 
             torch.cuda.empty_cache()
+            gc.collect()
 
             # --- Node 1.5: Enhanced Explainability (Modality-Aware) ---
             print("\n[Node: MedGemma Explainer]")
@@ -321,7 +358,7 @@ class ClinicalOrchestrator:
                 from .explainability import ExplainabilityResult
                 explainability_result = self.explainer.explain_with_findings(
                     image_path,
-                    system_prompt,
+                    clinical_query,
                     findings=vlm_findings,
                     modality=state["modality"]
                 )
@@ -339,60 +376,17 @@ class ClinicalOrchestrator:
             except Exception as e:
                 # Fallback to basic explainability
                 print(f"  > Enhanced explainability failed, using basic mode: {e}")
-                heatmap = self.explainer.explain(image_path, system_prompt, modality=state["modality"])
+                heatmap = self.explainer.explain(image_path, clinical_query, modality=state["modality"])
                 state["heatmap"] = heatmap
                 print("  > Attention Heatmap generated (basic mode).")
 
-            # --- Node 1.6: Heatmap-Guided Object Localization ---
-            print("\n[Node: Heatmap-Guided Object Localization]")
+            # --- Node: Clinical-Guided Heatmap Localization ---
+            print("\n[Node: Clinical-Guided Localization]")
             state["detections"] = []
-
-            # vlm_findings already extracted above for explainability
-            is_normal = any(f.get("class", "").lower() in ["no significant abnormality", "normal"] for f in vlm_findings) or not vlm_findings
-
-            # Use heatmap from state
-            heatmap = state.get("heatmap")
-
-            if is_normal:
-                print("  > Model indicates Normal/No findings. Skipping localized anomaly detection.")
-            elif heatmap is not None and np.max(heatmap) > 0:
-                # Threshold the heatmap (Top 8% for sharper localization)
-                thresh_val = np.percentile(heatmap, 92)
-                binary_map = (heatmap >= thresh_val).astype(np.uint8) * 255
-                
-                # Find contours
-                contours, _ = cv2.findContours(binary_map, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
-                h_max, w_max = heatmap.shape
-                min_area = (h_max * w_max) * 0.003 # 0.3% area
-                
-                finding_labels = [f.get("class", "Pathology") for f in vlm_findings if f.get("class", "").lower() not in ["no significant abnormality", "normal"]]
-                
-                for i, cnt in enumerate(contours):
-                    if cv2.contourArea(cnt) > min_area:
-                        x, y, w, h = cv2.boundingRect(cnt)
-                        # Padding
-                        pad = 12
-                        box = [max(0, x-pad), max(0, y-pad), min(w_max, x+w+pad), min(h_max, y+h+pad)]
-                        
-                        # Assign label from VLM findings if available, else generic
-                        label = finding_labels[i % len(finding_labels)] if finding_labels else "Heatmap-Localized Anomaly"
-                        
-                        state["detections"].append({
-                            "label": label,
-                            "box": box,
-                            "confidence": float(np.percentile(heatmap[y:y+h, x:x+w], 95))
-                        })
-                
-                # Fallback to absolute peak if no contours found but abnormality exists
-                if not state["detections"]:
-                    max_y, max_x = np.unravel_index(np.argmax(heatmap), heatmap.shape)
-                    pad = 50
-                    box = [max(0, max_x-pad), max(0, max_y-pad), min(w_max, max_x+pad), min(h_max, max_y+pad)]
-                    label = finding_labels[0] if finding_labels else "Peak Anomaly"
-                    state["detections"].append({"label": label, "box": box, "confidence": 1.0})
             
-            print(f"  > Logically Validated Detections: {len(state['detections'])}")
+            # Use Fusion logic: combine VLM boxes with Heatmap peak regions
+            state["detections"] = self._localize_findings(image_path, vlm_findings, state.get("heatmap"), state["modality"])
+            print(f"  > Validated Detections: {len(state['detections'])}")
 
             # Cleanup explainer hooks before unloading model
             self.explainer.cleanup()
@@ -400,27 +394,40 @@ class ClinicalOrchestrator:
             gc.collect()
             torch.cuda.empty_cache()
             
-            # --- Node 2: Tool Execution (SAM 2) ---
+            # --- Node 2: Tool Execution (SAM 2) + Verification Loop (NEW) ---
             if state["detections"]:
-                print("\n[Node: Segmentation Tool]")
-                self.sam.load() # Loads LoRA internally if present
+                print("\n[Node 2: Segmentation & Verification]")
+                self.sam.load()
                 self.sam.set_image(image_path)
                 
+                raw_segmentations = []
                 for det in state["detections"]:
                     box = det["box"]
-                    print(f"  > Segmenting ROI: {box}")
+                    print(f"  > Segmenting: {det['label']} at {box}")
                     masks, scores = self.sam.predict_mask(box)
                     
                     if masks is not None:
-                        for i, (mask, score) in enumerate(zip(masks, scores)):
+                        # Pick best mask
+                        best_idx = np.argmax(scores)
+                        mask = masks[best_idx]
+                        score = float(scores[best_idx])
+                        
+                        # Node 3: Verification (Segment-then-Verify)
+                        is_verified, clinical_confidence = self._verify_roi(image_path, mask, det["label"])
+                        
+                        if is_verified:
                             state["segmentations"].append({
                                 "box": box,
                                 "mask": mask, 
-                                "score": float(score),
-                                "label": f"{det['label']} (Cand {i+1})"
+                                "score": score,
+                                "label": det["label"],
+                                "verified": True,
+                                "clinical_confidence": clinical_confidence
                             })
-                
-                # self.sam.unload() # Optional
+                            print(f"    [VERIFIED] Finding confirmed with {clinical_confidence*100:.1f}% confidence")
+                        else:
+                            print(f"    [ATTENTION] Finding rejected/unconfirmed by clinical verification loop")
+                            state["warnings"].append(f"Inconclusive finding at {det['label']}: localization did not match reasoning")
 
             # --- Node 3: Clinical Validation & Reporting ---
             print("\n[Node 3: Clinical Validation & Reporting]")
@@ -458,7 +465,7 @@ class ClinicalOrchestrator:
 
             report = f"""
 ================================================================================
-                         MEDGAMMA CLINICAL AI REPORT
+                         GEMSAM CLINICAL AI REPORT
 ================================================================================
 Study Information:
   - Image: {os.path.basename(image_path)}
@@ -576,10 +583,99 @@ for clinical diagnosis without expert review.
         plt.close()
         print(f"Visualization saved to: {filepath}")
 
+    # --- GemSAM v2.0 Logic Methods ---
+
+    def _localize_findings(self, image_path, vlm_findings, heatmap, modality):
+        """
+        Coordinate Fusion v2.0: Reconciles VLM boxes with Heatmap attention.
+        """
+        if not vlm_findings:
+            return []
+            
+        detections = []
+        is_normal = any(f.get("class", "").lower() in ["no significant abnormality", "normal"] for f in vlm_findings)
+        if is_normal: return []
+
+        img = Image.open(image_path)
+        w_orig, h_orig = img.size
+
+        for f in vlm_findings:
+            label = f.get("class", "Anomaly")
+            vlm_box_norm = f.get("box") # [y1, x1, y2, x2] in 0-1000
+            
+            if not vlm_box_norm or len(vlm_box_norm) != 4:
+                # Fallback to heatmap only
+                continue
+
+            # Denormalize to pixel scale
+            y1, x1, y2, x2 = vlm_box_norm
+            x1_px, y1_px = int(x1 * w_orig / 1000), int(y1 * h_orig / 1000)
+            x2_px, y2_px = int(x2 * w_orig / 1000), int(y2 * h_orig / 1000)
+            vlm_box_px = [x1_px, y1_px, x2_px, y2_px]
+
+            # Refinement with heatmap peaking
+            if heatmap is not None:
+                roi_heatmap = heatmap[y1_px:y2_px, x1_px:x2_px]
+                if roi_heatmap.size > 0 and np.max(roi_heatmap) > 0.1: # Confidence Gate
+                    # Find heatmap centroid in this ROI
+                    max_y_rel, max_x_rel = np.unravel_index(np.argmax(roi_heatmap), roi_heatmap.shape)
+                    peak_x, peak_y = x1_px + max_x_rel, y1_px + max_y_rel
+                    
+                    # Shift box slightly towards peak attention (fusion)
+                    cx_orig, cy_orig = (x1_px + x2_px)//2, (y1_px + y2_px)//2
+                    shift_x, shift_y = int((peak_x - cx_orig) * 0.3), int((peak_y - cy_orig) * 0.3)
+                    
+                    vlm_box_px = [
+                        max(0, x1_px + shift_x), max(0, y1_px + shift_y),
+                        min(w_orig, x2_px + shift_x), min(h_orig, y2_px + shift_y)
+                    ]
+
+            detections.append({
+                "label": label,
+                "box": vlm_box_px,
+                "confidence": f.get("confidence", 0.7)
+            })
+        return detections
+
+    def _verify_roi(self, image_path, mask, label):
+        """
+        Verification Loop: Clips the ROI and asks MedGemma to verify the finding.
+        """
+        try:
+            # 1. Prepare ROI crop
+            img = np.array(Image.open(image_path).convert("RGB"))
+            h, w = img.shape[:2]
+            
+            # Use mask box for cropping
+            y_indices, x_indices = np.where(mask > 0)
+            if len(y_indices) == 0: return False, 0.0
+            
+            y1, x1, y2, x2 = np.min(y_indices), np.min(x_indices), np.max(y_indices), np.max(x_indices)
+            # Expand crop for context
+            pad = 40
+            crop = img[max(0, y1-pad):min(h, y2+pad), max(0, x1-pad):min(w, x2+pad)]
+            crop_pil = Image.fromarray(crop)
+            
+            # 2. Re-load MedGemma for verification (if not loaded)
+            self.medgemma.load() 
+            
+            # 3. Targeted Query
+            query = f"Focus on this specific highlighted region. Is there a {label} present here? Describe what you see."
+            response, _ = self.medgemma.analyze_image(crop_pil, query=query, task="vqa")
+            
+            # 4. Inference
+            verified = label.lower() in response.lower() or "yes" in response.lower()[:20]
+            confidence = 0.9 if verified else 0.3
+            
+            return verified, confidence
+        except Exception as e:
+            print(f"  (!) Verification loop error: {e}")
+            return True, 0.5 # Default to true to avoid missing potential findings
+
 def main():
     """CLI entry point for the orchestrator."""
     parser = argparse.ArgumentParser(
-        description="MedGamma Clinical Orchestrator - MedGemma + SAM2 Integration"
+        description="GemSAM Orchestrator - MedGemma + SAM2 Integration for Explainable Multi-Modal Medical Image Analysis"
     )
     parser.add_argument("--image", "-i", type=str, help="Path to medical image")
     parser.add_argument("--query", "-q", type=str,
@@ -596,7 +692,7 @@ def main():
     args = parser.parse_args()
 
     # Initialize orchestrator
-    orchestrator = ClinicalOrchestrator(checkpoint_dir=args.checkpoint)
+    orchestrator = GemSAMOrchestrator(checkpoint_dir=args.checkpoint)
 
     # Find image path
     img_path = args.image
@@ -636,6 +732,10 @@ def main():
             print(f"Segmentations: {len(state.get('segmentations', []))}")
     else:
         print("No test image found. Provide --image path or ensure sample data exists.")
+
+
+# Backward compatibility alias
+ClinicalOrchestrator = GemSAMOrchestrator
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ STAGE_CONFIGS = [
     },
     {
         "name": "detection",
-        "adapter_dir": "final",  # User says final has lower loss
+        "adapter_dir": "final",  # Use production-ready detection adapter
         "task": "detection",
         "dataset": "vindr",
         "split": "test",
@@ -134,7 +134,22 @@ class MultiStageEvaluator:
 
         if os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
             print(f"  Loading adapter: {adapter_path}")
-            wrapper.model = PeftModel.from_pretrained(wrapper.model, adapter_path)
+            # Use transformers' native load_adapter which is more robust for Gemma 3
+            if hasattr(wrapper.model, "load_adapter"):
+                wrapper.model.load_adapter(adapter_path)
+            else:
+                from peft import PeftModel
+                wrapper.model = PeftModel.from_pretrained(wrapper.model, adapter_path)
+
+            # CRITICAL FIX: Ensure LoRA weights are moved to GPU
+            try:
+                import torch
+                device = getattr(wrapper.model, 'device', torch.device('cuda:0'))
+                for name, param in wrapper.model.named_parameters():
+                    if param.device.type == 'cpu':
+                        param.data = param.data.to(device)
+            except Exception as e:
+                print(f"    Warning during device sync: {e}")
         else:
             print(f"  (!) No adapter_config.json found, using base model")
 
@@ -155,15 +170,20 @@ class MultiStageEvaluator:
         factory = MedicalDatasetFactory(base_data_dir=self.args.data_dir)
 
         try:
-            loader = factory.get_loader(dataset_name, task, batch_size=1, split=split)
+            # Pass abnormal_only flag (supported by VinDrCXRLoader now)
+            loader = factory.get_loader(dataset_name, task, batch_size=1, split=split, 
+                                      abnormal_only=getattr(self.args, 'abnormal_only', False))
         except Exception as e:
-            print(f"  Failed to load dataset '{dataset_name}': {e}")
-            model.unload()
+            print(f"  [ERROR] Stage '{stage_name}' dataset load failed: {e}")
+            import traceback
+            traceback.print_exc()
+            if model:
+                model.unload()
             return {"status": "failed", "error": f"Dataset load failed: {e}"}
 
         total_samples = len(loader.dataset)
 
-        # Subset if needed — use RANDOM indices for class diversity
+        # Subset if needed [DONE][DONE][DONE] use RANDOM indices for class diversity
         if self.args.max_samples > 0 and self.args.max_samples < total_samples:
             all_indices = list(range(total_samples))
             random.seed(42)  # Reproducible
@@ -249,7 +269,7 @@ class MultiStageEvaluator:
                     raw_samples.append({"gt": str(gt_label), "error": str(e)})
 
         acc = correct / max(total_count, 1)
-        print(f"  ✓ Screening Accuracy: {acc:.4f} ({correct}/{total_count})")
+        print(f"  [DONE][DONE][DONE] Screening Accuracy: {acc:.4f} ({correct}/{total_count})")
 
         return {
             "accuracy": round(acc, 4),
@@ -312,7 +332,7 @@ class MultiStageEvaluator:
         acc = correct / max(total_count, 1)
         per_class_acc = {k: round(v["correct"] / max(v["total"], 1), 4) for k, v in per_class.items()}
 
-        print(f"  ✓ Modality Accuracy: {acc:.4f}")
+        print(f"  [DONE][DONE][DONE] Modality Accuracy: {acc:.4f}")
         for cls, cls_acc in per_class_acc.items():
             print(f"    {cls}: {cls_acc}")
 
@@ -392,7 +412,8 @@ class MultiStageEvaluator:
             is_normal_gt = (not gt_boxes and not gt_labels)
 
             try:
-                generated_text, pred_boxes = model.analyze_image(image, task="detection")
+                modality = batch.get("modality", ["xray"])[0]
+                generated_text, pred_boxes = model.analyze_image(image, task="detection", modality=modality)
             except Exception as e:
                 print(f"  Error [{i}]: {e}")
                 fn += len(gt_boxes)
@@ -400,11 +421,14 @@ class MultiStageEvaluator:
                 continue
 
             if i < 5:  # Log first 5 samples
+                reasoning_list = model._extract_reasoning(generated_text)
                 raw_samples.append({
+                    "image_id": batch.get("image_id", ["unknown"])[0],
                     "gt_boxes": gt_boxes[:3],
                     "gt_labels": gt_labels[:3],
                     "pred_boxes": pred_boxes[:3],
-                    "raw_text": generated_text[:500]  # Increased for debugging
+                    "reasoning": reasoning_list[:3],
+                    "raw_text": generated_text[:500]
                 })
 
             # Denormalize predicted boxes (if normalized)
@@ -414,6 +438,11 @@ class MultiStageEvaluator:
                 try:
                     # Assume model outputs 0-1000 integers
                     x1, y1, x2, y2 = b
+                    
+                    # FILTER: Skip [0,0,0,0] (Normal finding) to avoid False Positive inflation
+                    if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
+                        continue
+                        
                     denorm_pred.append([
                         (x1 / 1000) * w, (y1 / 1000) * h,
                         (x2 / 1000) * w, (y2 / 1000) * h
@@ -459,7 +488,7 @@ class MultiStageEvaluator:
         f1 = 2 * precision * recall / max(precision + recall, 1e-6)
         avg_iou = iou_sum / max(iou_count, 1)
 
-        print(f"  ✓ Detection: P={precision:.4f} R={recall:.4f} F1={f1:.4f} IoU={avg_iou:.4f}")
+        print(f"  [DONE][DONE][DONE] Detection: P={precision:.4f} R={recall:.4f} F1={f1:.4f} IoU={avg_iou:.4f}")
         print(f"    TP={tp} FP={fp} FN={fn} (skipped {skipped_normal} normal images)")
 
         return {
@@ -527,7 +556,7 @@ class MultiStageEvaluator:
         bleu = bleu_sum / max(total_count, 1)
         rouge = rouge_sum / max(total_count, 1)
 
-        print(f"  ✓ VQA: Accuracy={acc:.4f} BLEU-1={bleu:.4f} ROUGE-1={rouge:.4f}")
+        print(f"  [DONE] VQA: Accuracy={acc:.4f} BLEU-1={bleu:.4f} ROUGE-1={rouge:.4f}")
 
         return {
             "accuracy": round(acc, 4),
@@ -561,7 +590,7 @@ class MultiStageEvaluator:
                 else:
                     metric_str = "N/A"
 
-                print(f"{stage_name:<15} {'✓':<12} {metric_str:<25} {samples:<10} {elapsed:<8.1f}s")
+                print(f"{stage_name:<15} {'[DONE]':<12} {metric_str:<25} {samples:<10} {elapsed:<8.1f}s")
             elif status == "skipped":
                 reason = result.get("reason", "")
                 print(f"{stage_name:<15} {'SKIP':<12} {reason:<25}")
@@ -613,6 +642,8 @@ if __name__ == "__main__":
     parser.add_argument("--stages", type=str, nargs="+",
                         default=["screening", "modality", "detection", "vqa"],
                         help="Stages to evaluate (default: all)")
+    parser.add_argument("--abnormal_only", action="store_true",
+                        help="Detection only: evaluate strictly on abnormal samples")
     args = parser.parse_args()
 
     # Filter stages if user specified a subset

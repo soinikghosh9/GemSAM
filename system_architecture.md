@@ -1,92 +1,953 @@
-# System Architecture: MedGemma 1.5 + SAM 2 Agentic Layer
+# GemSAM System Architecture Guide v2.1
 
-> [!IMPORTANT]
-> **Hardware Strategy**: Hybrid Execution on RTX 5070 Laptop (8GB VRAM).
-> **Core Concept**: **"Brain + Hands"**. MedGemma is the Brain (Reasoning/Detection), SAM 2 is the Hands (Segmentation).
-
-## 1. High-Level Design (Agentic Orchestrator)
-
-The system works as a **Stateful Agent** rather than a linear pipeline.
-
-```mermaid
-graph TD
-    A[User Query + Image] --> B[MedGemma 1.5 'Brain']
-    B -->|Decides Task| C{Action Selector}
-    C -->|Reasoning Only| D[Generate Classification/Report]
-    C -->|Needs Segmentation| E[Tool: SAM 2 'Hands']
-    E --> F[Generate Mask]
-    F --> G[MedGemma Validator]
-    G -->|Accept| H[Final Report]
-    G -->|Reject| B[Refine Prompt & Retry]
-```
-
-### Component Stack
-1.  **Cognitive Core**: `MedGemma 1.5 (4B)`
-    -   *Config*: 4-bit Quantization (NF4).
-    -   *Role*: Understands complex clinical queries ("Find the acute stroke"), reasons about anatomy, and outputs **Bounding Box Prompts** for SAM 2.
-2.  **Perception Core**: `SAM 2` (Segment Anything 2 - Medical Adapter)
-    -   *Config*: Tiny/Small ViT backbone or "Medical SAM" LoRA.
-    - **Description**: Meta's SAM 2 (Tiny).
-    - **Role**: Takes the bounding box from Node 1 and generates a precise pixel-level mask.
-    - **Input**: Image + Box Prompt.
-    - **Output**: Binary Mask + IoU Score.
-3.  **Knowledge Base**: `Vector Store (RAG)`
-    -   *Content*: Index of `clinical_knowledge_book.md`.
-    -   *Role*: Provides Guidelines (ACR/CAP) to MedGemma during reasoning.
-
-## 2. Detailed Data Flow
-
-### Stage 1: The Clinical Reasoner (MedGemma)
--   **Input**: `Image` + `Query` ("Evaluate for Glioblastoma").
--   **Internal Monologue**:
-    1.  "Query asks for Glioblastoma."
-    2.  "Searching for ring-enhancing lesions."
-    3.  *Action*: "Found lesion at [x,y]. I need to measure the edema-to-tumor ratio."
-    4.  *Tool Call*: `segment_lesion(box=[...], class="tumor")`, `segment_edema(box=[...])`.
-
-### Stage 2: The Executor (SAM 2)
--   **Input**: `Image` + `Box/Text Prompt`.
--   **Constraint**: If VRAM is full, unload MedGemma -> Load SAM 2.
--   **Action**: Generates Binary Masks.
-
-### Stage 3: The Synthesizer (Agent)
--   **Logic Layer**: Calculate Quantities.
-    -   `Tumor Volume = Sum(Pixels) * Voxel_Size`
-    -   `Edema Ratio = Edema_Vol / Tumor_Vol`
--   **Final Output**: MedGemma ingests the *measurements* + *original query* to write the standard radiology report.
-
-## 3. Technology & Optimization Stack
-
-### Software
--   **Orchestrator**: Python (Custom Class) or `LangGraph`.
--   **Inference**: `HuggingFace` + `bitsandbytes` (4-bit).
--   **Environment**: `conda env: medgamma`.
-
-### Hardware Toggles
--   `--low-vram`: Triggers aggressive Model Swapping (Load A -> Run -> Unload -> Load B).
--   `--parallel`: Uses CPU for one model if possible (slow but keeps both loaded).
--   `--quantize`: Force 4-bit/8-bit on all models.
+> **Purpose**: Complete technical reference for creating whitepaper diagrams
+> **Hardware Target**: RTX 5070 (8GB VRAM) Training | Raspberry Pi 5 + Hailo-10H Edge
+> **Core Concept**: "Brain + Hands" - MedGemma (Reasoning) + SAM2 (Segmentation)
+> **Full Title**: GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis on Edge using MedGemma-1.5 and SAM2
 
 ---
 
-## 4. Data Layer (Training Strategy)
+## 1. System Overview Diagram
 
-To achieve "Clinical Validity", we separate training streams:
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                            GEMSAM CLINICAL AI SYSTEM                               │
+│                                    v2.1                                              │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│    ┌──────────────┐         ┌──────────────────────────────────────────────────┐    │
+│    │              │         │           AGENTIC ORCHESTRATION LAYER            │    │
+│    │   INPUT      │         │  ┌────────────┐ ┌────────────┐ ┌─────────────┐   │    │
+│    │              │         │  │   State    │ │  Decision  │ │    Tool     │   │    │
+│    │ ┌─────────┐  │         │  │  Manager   │ │   Router   │ │  Executor   │   │    │
+│    │ │ Medical │  │────────▶│  │            │ │            │ │             │   │    │
+│    │ │  Image  │  │         │  │ AgentState │ │ Task→Model │ │ Load/Unload │   │    │
+│    │ └─────────┘  │         │  └────────────┘ └────────────┘ └─────────────┘   │    │
+│    │              │         └──────────────────────────────────────────────────┘    │
+│    │ ┌─────────┐  │                              │                                   │
+│    │ │Clinical │  │                              ▼                                   │
+│    │ │ Query   │  │         ┌──────────────────────────────────────────────────┐    │
+│    │ └─────────┘  │         │                MODEL LAYER                        │    │
+│    └──────────────┘         │                                                   │    │
+│                             │  ┌─────────────────┐    ┌─────────────────────┐   │    │
+│                             │  │   MedGemma 1.5  │    │      SAM 2          │   │    │
+│                             │  │   "THE BRAIN"   │    │   "THE HANDS"       │   │    │
+│                             │  │                 │    │                     │   │    │
+│                             │  │  ┌───────────┐  │    │  ┌───────────────┐  │   │    │
+│                             │  │  │  SigLIP   │  │    │  │ Hiera-Tiny    │  │   │    │
+│                             │  │  │  Vision   │  │    │  │ Image Encoder │  │   │    │
+│                             │  │  │  Encoder  │  │    │  │   (LoRA)      │  │   │    │
+│                             │  │  │  400M     │  │    │  │    27M        │  │   │    │
+│                             │  │  └─────┬─────┘  │    │  └───────┬───────┘  │   │    │
+│                             │  │        │        │    │          │          │   │    │
+│                             │  │  ┌─────▼─────┐  │    │  ┌───────▼───────┐  │   │    │
+│                             │  │  │MM Projector│ │    │  │Prompt Encoder │  │   │    │
+│                             │  │  │  ~10M     │  │    │  │    ~1M        │  │   │    │
+│                             │  │  └─────┬─────┘  │    │  └───────┬───────┘  │   │    │
+│                             │  │        │        │    │          │          │   │    │
+│                             │  │  ┌─────▼─────┐  │    │  ┌───────▼───────┐  │   │    │
+│                             │  │  │  Gemma 3  │  │    │  │ Mask Decoder  │  │   │    │
+│                             │  │  │ Language  │  │    │  │    ~4M        │  │   │    │
+│                             │  │  │  (LoRA)   │  │    │  └───────────────┘  │   │    │
+│                             │  │  │   ~2B     │  │    │                     │   │    │
+│                             │  │  └───────────┘  │    │  Total: ~32M        │   │    │
+│                             │  │                 │    │                     │   │    │
+│                             │  │  Total: 4B      │    └─────────────────────┘   │    │
+│                             │  └─────────────────┘                              │    │
+│                             └──────────────────────────────────────────────────┘    │
+│                                              │                                       │
+│                                              ▼                                       │
+│                             ┌──────────────────────────────────────────────────┐    │
+│                             │              INTELLIGENCE LAYER                   │    │
+│                             │  ┌────────────┐ ┌────────────┐ ┌──────────────┐  │    │
+│                             │  │Explainabil-│ │  Clinical  │ │  Knowledge   │  │    │
+│                             │  │    ity     │ │Intelligence│ │    Base      │  │    │
+│                             │  │            │ │            │ │    (RAG)     │  │    │
+│                             │  │ Attention  │ │  Quality   │ │  Guidelines  │  │    │
+│                             │  │ Heatmaps   │ │ Assessment │ │  Retrieval   │  │    │
+│                             │  │ ROI Valid. │ │ Validation │ │              │  │    │
+│                             │  └────────────┘ └────────────┘ └──────────────┘  │    │
+│                             └──────────────────────────────────────────────────┘    │
+│                                              │                                       │
+│    ┌──────────────┐                          ▼                                       │
+│    │   OUTPUT     │         ┌──────────────────────────────────────────────────┐    │
+│    │              │         │                OUTPUT LAYER                       │    │
+│    │ ┌─────────┐  │◀────────│  ┌────────────┐ ┌────────────┐ ┌──────────────┐  │    │
+│    │ │Clinical │  │         │  │ Detection  │ │Segmentation│ │   Clinical   │  │    │
+│    │ │ Report  │  │         │  │  Boxes     │ │   Masks    │ │   Report     │  │    │
+│    │ └─────────┘  │         │  │ [x1,y1,    │ │ Binary     │ │  Structured  │  │    │
+│    │ ┌─────────┐  │         │  │  x2,y2]    │ │ [H,W]      │ │    JSON      │  │    │
+│    │ │Visualiz-│  │         │  └────────────┘ └────────────┘ └──────────────┘  │    │
+│    │ │ ation   │  │         └──────────────────────────────────────────────────┘    │
+│    │ └─────────┘  │                                                                  │
+│    └──────────────┘                                                                  │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-### Stream A: Reasoning & Detection (The Brain)
-*Objective: Teach MedGemma to identify pathologies and request tools.*
-- **Dataset 1**: **VinDr-CXR** (Chest X-Ray)
-    - *Features*: High-quality Bounding Boxes + Radiologist Consensus.
-    - *Usage*: Train `[Detect] -> [Box]` logic.
-- **Dataset 2**: **SLAKE / VQA-RAD**
-    - *Features*: Q&A pairs with reasoning.
-    - *Usage*: Train `[Query] -> [Reasoning Chain]`.
+---
 
-### Stream B: Segmentation Texture (The Hands)
-*Objective: Teach SAM 2 "Medical Transparency" (X-ray overlay, MRI soft tissue).*
-- **Dataset 1**: **BraTS (Brain Tumor Segmentation)**
-    - *Features*: 4-channel MRI (T1/T2/FLAIR/T1ce) -> 3-class Masks.
-    - *Usage*: Fine-tune SAM 2 Image Encoder (LoRA).
-- **Dataset 2**: **VinDr-RibCXR / CheXmask**
-    - *Features*: Precise Rib/Lung masks.
-    - *Usage*: Adaptation for X-ray domain.
+## 2. Data Flow Pipeline (8-Stage)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         GEMSAM 8-STAGE CLINICAL PIPELINE                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE -1: IMAGE QUALITY ASSESSMENT                                          │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  INPUT                        PROCESS                       OUTPUT          │    │
+│  │  ┌───────────┐               ┌──────────────┐              ┌────────────┐   │    │
+│  │  │Raw Image  │──────────────▶│ImageQuality- │─────────────▶│Quality     │   │    │
+│  │  │[H,W,3]    │               │  Assessor    │              │Score [0-1] │   │    │
+│  │  │Any size   │               │              │              │            │   │    │
+│  │  └───────────┘               │Checks:       │              │Warnings[]  │   │    │
+│  │                              │• Resolution  │              └────────────┘   │    │
+│  │  PARAMETERS:                 │  ≥256×256    │                               │    │
+│  │  • min_resolution: 256       │• Contrast    │  THRESHOLDS:                  │    │
+│  │  • brightness_range: 0.1-0.9 │• Brightness  │  • GOOD: >0.7                 │    │
+│  │  • contrast_min: 0.3         │• Artifacts   │  • MODERATE: 0.5-0.7          │    │
+│  │                              └──────────────┘  • POOR: <0.5                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+│                                         ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 0: MODEL INITIALIZATION                                                │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  ┌───────────────────┐     ┌───────────────────┐     ┌──────────────────┐   │    │
+│  │  │Load Base Model    │────▶│Apply LoRA Adapter │────▶│Set Eval Mode     │   │    │
+│  │  │                   │     │                   │     │                  │   │    │
+│  │  │google/medgemma-   │     │checkpoints/       │     │model.eval()      │   │    │
+│  │  │1.5-4b-it          │     │production/        │     │torch.no_grad()   │   │    │
+│  │  │                   │     │medgemma/detection │     │                  │   │    │
+│  │  │Size: 8.6GB        │     │Size: ~130MB       │     │VRAM: ~6GB        │   │    │
+│  │  └───────────────────┘     └───────────────────┘     └──────────────────┘   │    │
+│  │                                                                              │    │
+│  │  QUANTIZATION: NF4 (4-bit) via bitsandbytes                                  │    │
+│  │  MEMORY: ~6GB VRAM with gradient checkpointing                               │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+│                                         ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 0.5: MODALITY DETECTION (CRITICAL)                                     │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  ┌─────────────┐         ┌─────────────┐         ┌─────────────────────┐    │    │
+│  │  │ VLM-Based   │         │Image-Based  │         │   Fusion Engine     │    │    │
+│  │  │ Detection   │         │ Analysis    │         │                     │    │    │
+│  │  │             │         │             │         │ Weighted Voting:    │    │    │
+│  │  │ MedGemma    │────────▶│ Brightness  │────────▶│ w_vlm=0.7           │    │    │
+│  │  │ Inference   │         │ Contrast    │         │ w_img=0.3           │    │    │
+│  │  │             │         │ Histogram   │         │                     │    │    │
+│  │  └─────────────┘         └─────────────┘         │ Output:             │    │    │
+│  │                                                   │ modality ∈ {xray,   │    │    │
+│  │  PROMPT: "What imaging modality was used?"        │  mri, ct, ultra}   │    │    │
+│  │                                                   │ confidence [0-1]   │    │    │
+│  │                                                   └─────────────────────┘    │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+│                                         ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 1: KNOWLEDGE RETRIEVAL (RAG)                                           │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  INPUT                      PROCESS                        OUTPUT           │    │
+│  │  ┌──────────────┐          ┌────────────────┐             ┌─────────────┐   │    │
+│  │  │Modality +    │─────────▶│ClinicalKnow-   │────────────▶│Guidelines   │   │    │
+│  │  │Clinical Query│          │ledgeBase       │             │Context      │   │    │
+│  │  │              │          │                │             │             │   │    │
+│  │  │"Brain MRI:   │          │• Embedding     │             │ACR/CAP      │   │    │
+│  │  │ Find tumor"  │          │• Semantic      │             │Protocols    │   │    │
+│  │  │              │          │  Search        │             │Top-k=2      │   │    │
+│  │  └──────────────┘          │• Retrieval     │             └─────────────┘   │    │
+│  │                            └────────────────┘                                │    │
+│  │  KNOWLEDGE SOURCE: clinical_knowledge_book.md                                │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+└─────────────────────────────────────────┴────────────────────────────────────────────┘
+                                          │
+                                          ▼
+                                    [CONTINUED...]
+```
+
+---
+
+## 3. Detection & Explainability Stages
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        STAGES 2-4: DETECTION & EXPLAINABILITY                        │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 2: MODALITY-SPECIFIC DETECTION                                         │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  INPUT TENSOR                    MedGemma INFERENCE                          │    │
+│  │  ┌────────────────┐             ┌─────────────────────────────────────────┐  │    │
+│  │  │Image           │             │                                         │  │    │
+│  │  │[1, 3, 896, 896]│────────────▶│ ┌─────────────────────────────────────┐ │  │    │
+│  │  │                │             │ │ SigLIP Vision Encoder               │ │  │    │
+│  │  │dtype: float16  │             │ │ Input:  [1, 3, 896, 896]            │ │  │    │
+│  │  └────────────────┘             │ │ Output: [1, 4096, 1152]             │ │  │    │
+│  │                                 │ │ (64×64 patches × 1152 dim)          │ │  │    │
+│  │  ┌────────────────┐             │ └──────────────────┬──────────────────┘ │  │    │
+│  │  │Modality Prompt │             │                    │                    │  │    │
+│  │  │                │             │ ┌──────────────────▼──────────────────┐ │  │    │
+│  │  │XRAY: 22 classes│             │ │ AvgPool2D (4×4, stride 4)          │ │  │    │
+│  │  │MRI:  16 classes│             │ │ Output: [1, 256, 1152]             │ │  │    │
+│  │  │CT:   11 classes│             │ │ (16×16 = 256 visual tokens)        │ │  │    │
+│  │  │US:    8 classes│             │ └──────────────────┬──────────────────┘ │  │    │
+│  │  └────────────────┘             │                    │                    │  │    │
+│  │                                 │ ┌──────────────────▼──────────────────┐ │  │    │
+│  │                                 │ │ Multi-Modal Projector              │ │  │    │
+│  │                                 │ │ 2-layer MLP                        │ │  │    │
+│  │                                 │ │ Output: [1, 256, 2048]             │ │  │    │
+│  │                                 │ │ (aligned to language space)        │ │  │    │
+│  │                                 │ └──────────────────┬──────────────────┘ │  │    │
+│  │                                 │                    │                    │  │    │
+│  │                                 │ ┌──────────────────▼──────────────────┐ │  │    │
+│  │                                 │ │ Gemma 3 Language Model + LoRA      │ │  │    │
+│  │                                 │ │ Input: 256 visual + N text tokens  │ │  │    │
+│  │                                 │ │ LoRA: r=16, α=32                   │ │  │    │
+│  │                                 │ │ Target: q,k,v,o,gate,up,down_proj  │ │  │    │
+│  │                                 │ └──────────────────┬──────────────────┘ │  │    │
+│  │                                 │                    │                    │  │    │
+│  │                                 └────────────────────┼────────────────────┘  │    │
+│  │                                                      │                       │    │
+│  │  OUTPUT (JSON)                                       ▼                       │    │
+│  │  ┌───────────────────────────────────────────────────────────────────────┐   │    │
+│  │  │ {                                                                      │   │    │
+│  │  │   "findings": [                                                        │   │    │
+│  │  │     {                                                                  │   │    │
+│  │  │       "class": "Glioma",                                               │   │    │
+│  │  │       "box": [350, 200, 650, 500],  // normalized 0-1000               │   │    │
+│  │  │       "description": "Heterogeneous mass in right temporal lobe..."    │   │    │
+│  │  │     }                                                                  │   │    │
+│  │  │   ]                                                                    │   │    │
+│  │  │ }                                                                      │   │    │
+│  │  └───────────────────────────────────────────────────────────────────────┘   │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+│                                         ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 3: ENHANCED EXPLAINABILITY                                             │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  ATTENTION EXTRACTION                         AGGREGATION METHODS            │    │
+│  │  ┌─────────────────────┐                     ┌─────────────────────────┐    │    │
+│  │  │ Vision Encoder      │                     │ LAST_LAYER (default)    │    │    │
+│  │  │ Attention Hooks     │                     │ • Memory efficient      │    │    │
+│  │  │                     │                     │ • Uses final layer only │    │    │
+│  │  │ Layer L-1 ──────────│────────────────────▶│                         │    │    │
+│  │  │ Shape: [H, N, N]    │                     │ ROLLOUT (optional)      │    │    │
+│  │  │ H=heads, N=patches  │                     │ • Tracks attention flow │    │    │
+│  │  └─────────────────────┘                     │ • R = 0.5*A + 0.5*I     │    │    │
+│  │                                              └────────────┬────────────┘    │    │
+│  │                                                           │                  │    │
+│  │  ┌────────────────────────────────────────────────────────▼─────────────┐   │    │
+│  │  │                     HEATMAP GENERATION                                │   │    │
+│  │  │  ┌─────────────┐    ┌──────────────┐    ┌─────────────────────────┐  │   │    │
+│  │  │  │Raw Attention│───▶│Reshape to    │───▶│Resize to Image          │  │   │    │
+│  │  │  │[1, H, 256]  │    │[16, 16]      │    │[H, W] + GaussianBlur    │  │   │    │
+│  │  │  └─────────────┘    └──────────────┘    └─────────────────────────┘  │   │    │
+│  │  └──────────────────────────────────────────────────────────────────────┘   │    │
+│  │                                                           │                  │    │
+│  │  ┌────────────────────────────────────────────────────────▼─────────────┐   │    │
+│  │  │                     ROI COVERAGE VALIDATION                           │   │    │
+│  │  │                                                                       │   │    │
+│  │  │  Formula: ROI_Coverage = Σ(H(p) * 1[H(p)>τ]) for p∈ROI               │   │    │
+│  │  │                         ────────────────────────────────              │   │    │
+│  │  │                         Σ(H(p) * 1[H(p)>τ]) for all p                │   │    │
+│  │  │                                                                       │   │    │
+│  │  │  Interpretation:                                                      │   │    │
+│  │  │  • >0.8: Excellent alignment (High reliability)                       │   │    │
+│  │  │  • 0.5-0.8: Good alignment (Moderate reliability)                     │   │    │
+│  │  │  • 0.3-0.5: Partial alignment (Low reliability)                       │   │    │
+│  │  │  • <0.3: Poor alignment (Requires verification)                       │   │    │
+│  │  └──────────────────────────────────────────────────────────────────────┘   │    │
+│  │                                                                              │    │
+│  │  OUTPUT: ExplainabilityResult                                                │    │
+│  │  ┌───────────────────────────────────────────────────────────────────────┐   │    │
+│  │  │ • heatmap: np.ndarray [H, W]                                           │   │    │
+│  │  │ • overlay: np.ndarray [H, W, 3]                                        │   │    │
+│  │  │ • finding_heatmaps: Dict[str, np.ndarray]                              │   │    │
+│  │  │ • attention_peaks: List[Tuple[int, int]]                               │   │    │
+│  │  │ • roi_coverage: float [0-1]                                            │   │    │
+│  │  │ • attention_quality: float [0-1]                                       │   │    │
+│  │  │ • clinical_explanation: str                                            │   │    │
+│  │  └───────────────────────────────────────────────────────────────────────┘   │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+│                                         ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 4: HEATMAP-GUIDED LOCALIZATION                                         │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐     │    │
+│  │  │ Heatmap         │    │ Threshold at     │    │ Find Contours       │     │    │
+│  │  │ [H, W]          │───▶│ 92nd percentile  │───▶│ cv2.findContours    │     │    │
+│  │  │ float [0-1]     │    │ Binary mask      │    │                     │     │    │
+│  │  └─────────────────┘    └──────────────────┘    └──────────┬──────────┘     │    │
+│  │                                                             │                │    │
+│  │                              ┌──────────────────────────────▼───────────┐    │    │
+│  │                              │ For each contour:                        │    │    │
+│  │                              │ • Filter by min_area (0.3% of image)     │    │    │
+│  │                              │ • Get bounding rect                      │    │    │
+│  │                              │ • Add padding (12px)                     │    │    │
+│  │                              │ • Assign label from VLM findings         │    │    │
+│  │                              │ • Calculate confidence from heatmap      │    │    │
+│  │                              └──────────────────────────────────────────┘    │    │
+│  │                                                                              │    │
+│  │  OUTPUT: detections[]                                                        │    │
+│  │  ┌───────────────────────────────────────────────────────────────────────┐   │    │
+│  │  │ [                                                                      │   │    │
+│  │  │   {"label": "Glioma", "box": [338, 188, 662, 512], "confidence": 0.87} │   │    │
+│  │  │ ]                                                                      │   │    │
+│  │  └───────────────────────────────────────────────────────────────────────┘   │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. Segmentation & Validation Stages
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        STAGES 5-7: SEGMENTATION & REPORTING                          │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 5: PRECISE SEGMENTATION (SAM2)                                         │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  MODEL LOADING (Sequential - VRAM constraint)                                │    │
+│  │  ┌────────────────────────────────────────────────────────────────────────┐  │    │
+│  │  │ 1. Unload MedGemma (free ~6GB VRAM)                                    │  │    │
+│  │  │ 2. gc.collect() + torch.cuda.empty_cache()                             │  │    │
+│  │  │ 3. Load SAM2 Hiera-Tiny (~2GB VRAM)                                    │  │    │
+│  │  │ 4. Apply LoRA adapter if exists                                        │  │    │
+│  │  └────────────────────────────────────────────────────────────────────────┘  │    │
+│  │                                                                              │    │
+│  │  SAM2 ARCHITECTURE                                                           │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────────┐ │    │
+│  │  │                                                                         │ │    │
+│  │  │  INPUT                                                                  │ │    │
+│  │  │  ┌────────────┐    ┌────────────┐                                       │ │    │
+│  │  │  │Image       │    │Box Prompt  │                                       │ │    │
+│  │  │  │[1,3,1024,  │    │[x1,y1,x2,y2]                                       │ │    │
+│  │  │  │    1024]   │    │from Stage 4│                                       │ │    │
+│  │  │  └─────┬──────┘    └──────┬─────┘                                       │ │    │
+│  │  │        │                  │                                             │ │    │
+│  │  │        ▼                  ▼                                             │ │    │
+│  │  │  ┌───────────────┐  ┌───────────────┐                                   │ │    │
+│  │  │  │Hiera-Tiny     │  │Prompt Encoder │                                   │ │    │
+│  │  │  │Image Encoder  │  │               │                                   │ │    │
+│  │  │  │(+ LoRA)       │  │Positional     │                                   │ │    │
+│  │  │  │               │  │Encoding       │                                   │ │    │
+│  │  │  │Params: 27M    │  │Params: ~1M    │                                   │ │    │
+│  │  │  │Output:        │  │Output:        │                                   │ │    │
+│  │  │  │[1,256,64,64]  │  │[1,256]        │                                   │ │    │
+│  │  │  └───────┬───────┘  └───────┬───────┘                                   │ │    │
+│  │  │          │                  │                                           │ │    │
+│  │  │          └────────┬─────────┘                                           │ │    │
+│  │  │                   ▼                                                     │ │    │
+│  │  │          ┌────────────────────┐                                         │ │    │
+│  │  │          │   Mask Decoder     │                                         │ │    │
+│  │  │          │                    │                                         │ │    │
+│  │  │          │ Transformer-based  │                                         │ │    │
+│  │  │          │ Cross-attention    │                                         │ │    │
+│  │  │          │ Params: ~4M        │                                         │ │    │
+│  │  │          │                    │                                         │ │    │
+│  │  │          │ Output:            │                                         │ │    │
+│  │  │          │ masks [3, H, W]    │                                         │ │    │
+│  │  │          │ iou_scores [3]     │                                         │ │    │
+│  │  │          └────────────────────┘                                         │ │    │
+│  │  │                                                                         │ │    │
+│  │  │  MASK SELECTION: Pick highest IoU score                                 │ │    │
+│  │  │                                                                         │ │    │
+│  │  └─────────────────────────────────────────────────────────────────────────┘ │    │
+│  │                                                                              │    │
+│  │  OUTPUT: segmentations[]                                                     │    │
+│  │  ┌───────────────────────────────────────────────────────────────────────┐   │    │
+│  │  │ [                                                                      │   │    │
+│  │  │   {                                                                    │   │    │
+│  │  │     "box": [338, 188, 662, 512],                                       │   │    │
+│  │  │     "mask": ndarray[H, W] (binary),                                    │   │    │
+│  │  │     "score": 0.92,                                                     │   │    │
+│  │  │     "label": "Glioma (Cand 1)"                                         │   │    │
+│  │  │   }                                                                    │   │    │
+│  │  │ ]                                                                      │   │    │
+│  │  └───────────────────────────────────────────────────────────────────────┘   │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+│                                         ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 6: CLINICAL VALIDATION                                                 │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │                    ClinicalIntelligence Module                       │    │    │
+│  │  │                                                                      │    │    │
+│  │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐  │    │    │
+│  │  │  │ Anatomical      │  │ Confidence      │  │ Consistency         │  │    │    │
+│  │  │  │ Plausibility    │  │ Thresholding    │  │ Checking            │  │    │    │
+│  │  │  │                 │  │                 │  │                     │  │    │    │
+│  │  │  │ • Location vs   │  │ HIGH:    >0.9   │  │ • Findings vs       │  │    │    │
+│  │  │  │   modality      │  │ MODERATE: 0.7-0.9│ │   modality vocab   │  │    │    │
+│  │  │  │ • Size ranges   │  │ LOW:     0.5-0.7│  │ • Box coordinates   │  │    │    │
+│  │  │  │ • Organ context │  │ UNCERTAIN: <0.5 │  │   within bounds     │  │    │    │
+│  │  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘  │    │    │
+│  │  │                                                                      │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                                                                              │    │
+│  │  OUTPUT:                                                                     │    │
+│  │  • validation_status: "valid" | "review_required" | "invalid"                │    │
+│  │  • warnings: List[str]                                                       │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                         │                                            │
+│                                         ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ STAGE 7: REPORT GENERATION                                                   │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │                      REPORT COMPONENTS                               │    │    │
+│  │  │                                                                      │    │    │
+│  │  │  1. STUDY INFORMATION                                                │    │    │
+│  │  │     ├── Image filename                                               │    │    │
+│  │  │     ├── Modality + confidence                                        │    │    │
+│  │  │     ├── Image quality score                                          │    │    │
+│  │  │     └── Processing time                                              │    │    │
+│  │  │                                                                      │    │    │
+│  │  │  2. CLINICAL FINDINGS                                                │    │    │
+│  │  │     ├── MedGemma reasoning text                                      │    │    │
+│  │  │     ├── Detected pathologies with locations                          │    │    │
+│  │  │     └── Confidence levels per finding                                │    │    │
+│  │  │                                                                      │    │    │
+│  │  │  3. SEGMENTATION RESULTS                                             │    │    │
+│  │  │     ├── Number of regions segmented                                  │    │    │
+│  │  │     └── IoU scores                                                   │    │    │
+│  │  │                                                                      │    │    │
+│  │  │  4. VALIDATION STATUS                                                │    │    │
+│  │  │     ├── Overall status                                               │    │    │
+│  │  │     └── Warnings list                                                │    │    │
+│  │  │                                                                      │    │    │
+│  │  │  5. DISCLAIMER                                                       │    │    │
+│  │  │     └── Research use only notice                                     │    │    │
+│  │  │                                                                      │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                                                                              │    │
+│  │  VISUALIZATION OUTPUT (3-panel)                                              │    │
+│  │  ┌─────────────────┬─────────────────┬─────────────────┐                    │    │
+│  │  │  DETECTION      │  ATTENTION      │  SEGMENTATION   │                    │    │
+│  │  │  (MedGemma)     │  (Heatmap)      │  (SAM2)         │                    │    │
+│  │  │                 │                 │                 │                    │    │
+│  │  │  Image +        │  Image +        │  Image +        │                    │    │
+│  │  │  Red boxes      │  Colormap       │  Yellow masks   │                    │    │
+│  │  │                 │  overlay        │  Dashed boxes   │                    │    │
+│  │  └─────────────────┴─────────────────┴─────────────────┘                    │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. Training Pipeline Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         GEMSAM TRAINING PIPELINE                                   │
+│                     5-Stage Curriculum Learning Framework                            │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                        CURRICULUM PROGRESSION                                │    │
+│  │                                                                              │    │
+│  │   STAGE 1          STAGE 2          STAGE 3          STAGE 4         STAGE 5│    │
+│  │  ┌────────┐       ┌────────┐       ┌────────┐       ┌────────┐      ┌──────┐│    │
+│  │  │SCREEN- │──────▶│MODALITY│──────▶│DETECT- │──────▶│  VQA   │─────▶│ SEG  ││    │
+│  │  │  ING   │       │  DET   │       │  ION   │       │        │      │      ││    │
+│  │  └────────┘       └────────┘       └────────┘       └────────┘      └──────┘│    │
+│  │                                                                              │    │
+│  │  Task:            Task:            Task:            Task:           Task:    │    │
+│  │  Binary           4-class          Localize +       Clinical        Pixel   │    │
+│  │  Normal/          Modality         Classify         Reasoning       Masks   │    │
+│  │  Abnormal         ID               Pathology        Q&A                     │    │
+│  │                                                                              │    │
+│  │  Model:           Model:           Model:           Model:          Model:  │    │
+│  │  MedGemma         MedGemma         MedGemma         MedGemma        SAM2    │    │
+│  │                                                                              │    │
+│  │  Epochs: 2        Epochs: 2        Epochs: 1-3      Epochs: 2       Epochs:5│    │
+│  │  Time: ~30min     Time: ~20min     Time: ~23h       Time: ~1h       Time:15m│    │
+│  │                                                                              │    │
+│  │  Loss: 4.06→2.38  Loss: 0.96→0.53  Loss: 0.89→0.37  Loss: 0.46→0.35 0.35→0.16│   │
+│  │  (-41.4%)         (-44.8%)         (-58.4%)         (-23.9%)        (-54.3%)│    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                     STAGE 3: DETECTION TRAINING DETAIL                       │    │
+│  ├─────────────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                              │    │
+│  │   DATA LOADING                                                               │    │
+│  │   ┌──────────────────────────────────────────────────────────────────────┐  │    │
+│  │   │  RAW DATASETS              PREPROCESSING              OUTPUT         │  │    │
+│  │   │  ┌────────────┐           ┌────────────┐           ┌────────────┐   │  │    │
+│  │   │  │VinDr-CXR   │──┐        │Resize 448² │           │Tokenized   │   │  │    │
+│  │   │  │15K, 22 cls │  │        │Normalize   │           │Batches     │   │  │    │
+│  │   │  └────────────┘  │        │RGB Convert │           │            │   │  │    │
+│  │   │  ┌────────────┐  ├───────▶│            ├──────────▶│max_len:    │   │  │    │
+│  │   │  │Brain MRI   │  │        │Class       │           │1024        │   │  │    │
+│  │   │  │5.7K, 4 cls │  │        │Balance 30% │           │            │   │  │    │
+│  │   │  └────────────┘  │        │            │           │batch_size: │   │  │    │
+│  │   │  ┌────────────┐  │        └────────────┘           │2           │   │  │    │
+│  │   │  │NIH Chest   │──┘                                 └────────────┘   │  │    │
+│  │   │  │112K, 14 cls│                                                     │  │    │
+│  │   │  └────────────┘                                                     │  │    │
+│  │   └──────────────────────────────────────────────────────────────────────┘  │    │
+│  │                                                                              │    │
+│  │   MEMORY STRATEGIES                                                          │    │
+│  │   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                      │    │
+│  │   │ DISK CACHE   │  │ RAM CACHE    │  │ STREAM MODE  │                      │    │
+│  │   │ (DEFAULT)    │  │ (64GB+ RAM)  │  │ (LOW RAM)    │                      │    │
+│  │   │              │  │              │  │              │                      │    │
+│  │   │ RAM: ~12GB   │  │ RAM: 28-30GB │  │ RAM: ~10GB   │                      │    │
+│  │   │ Speed: 12-15s│  │ Speed: 10s   │  │ Speed: 20s   │                      │    │
+│  │   │ Stable: HIGH │  │ Stable: LOW* │  │ Stable: MED  │                      │    │
+│  │   └──────────────┘  └──────────────┘  └──────────────┘                      │    │
+│  │   *RAM cache causes 10x slowdown on 32GB due to paging                       │    │
+│  │                                                                              │    │
+│  │   TRAINING LOOP                                                              │    │
+│  │   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐       │    │
+│  │   │ Batch   │──▶│ Forward │──▶│ CE Loss │──▶│ Backward│──▶│ AdamW   │       │    │
+│  │   │ Load    │   │ NF4     │   │ Auto-   │   │ Accum=8 │   │ lr=2e-5 │       │    │
+│  │   │ size=2  │   │ Quant   │   │ regress │   │ eff=16  │   │ wd=0.01 │       │    │
+│  │   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘       │    │
+│  │                                                                              │    │
+│  │   CHECKPOINTING: Every 500 batches → adapter_model.safetensors (~130MB)     │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 6. LoRA Fine-Tuning Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                          LoRA (LOW-RANK ADAPTATION) ARCHITECTURE                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  MATHEMATICAL FORMULATION                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │   Standard:     W' = W + ΔW                                                  │    │
+│  │   LoRA:         ΔW = B × A        where B ∈ ℝ^(d×r), A ∈ ℝ^(r×k)            │    │
+│  │   Scaled:       h = Wx + (α/r) × BAx                                         │    │
+│  │                                                                              │    │
+│  │   Parameter Reduction Example (2048×2048 matrix):                            │    │
+│  │   Original: 4,194,304 params → LoRA (r=16): 65,536 params = 64× reduction   │    │
+│  │                                                                              │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  LoRA INJECTION IN TRANSFORMER                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │  Input ─────────────────────────────────────────────────────────────▶ Output │    │
+│  │    │                                                                         │    │
+│  │    ▼                                                                         │    │
+│  │  ┌───────────────────────────────────────────────────────────────────────┐  │    │
+│  │  │                    MULTI-HEAD SELF-ATTENTION                          │  │    │
+│  │  │                                                                       │  │    │
+│  │  │  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐               │  │    │
+│  │  │  │ Q_proj  │   │ K_proj  │   │ V_proj  │   │ O_proj  │               │  │    │
+│  │  │  │ +LoRA   │   │ +LoRA   │   │ +LoRA   │   │ +LoRA   │               │  │    │
+│  │  │  │ [B][A]  │   │ [B][A]  │   │ [B][A]  │   │ [B][A]  │               │  │    │
+│  │  │  └─────────┘   └─────────┘   └─────────┘   └─────────┘               │  │    │
+│  │  └───────────────────────────────────────────────────────────────────────┘  │    │
+│  │    │                                                                         │    │
+│  │    ▼                                                                         │    │
+│  │  ┌───────────────────────────────────────────────────────────────────────┐  │    │
+│  │  │                      FEED-FORWARD NETWORK                             │  │    │
+│  │  │                                                                       │  │    │
+│  │  │  ┌──────────┐      ┌──────────┐      ┌──────────┐                    │  │    │
+│  │  │  │Gate_proj │      │ Up_proj  │      │Down_proj │                    │  │    │
+│  │  │  │ +LoRA    │  ×   │ +LoRA    │  →   │ +LoRA    │                    │  │    │
+│  │  │  │ [B][A]   │      │ [B][A]   │      │ [B][A]   │                    │  │    │
+│  │  │  └──────────┘      └──────────┘      └──────────┘                    │  │    │
+│  │  └───────────────────────────────────────────────────────────────────────┘  │    │
+│  │                                                                              │    │
+│  │  TARGET MODULES: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down   │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  CONFIGURATION COMPARISON                                                            │
+│  ┌────────────────────────────────┬────────────────────────────────┐                │
+│  │       MEDGEMMA 1.5 (in GemSAM)          │         SAM2 HIERA-TINY        │                │
+│  ├────────────────────────────────┼────────────────────────────────┤                │
+│  │ Base Params: 4.3B              │ Base Params: 32M               │                │
+│  │ Rank (r): 16                   │ Rank (r): 8                    │                │
+│  │ Alpha (α): 32                  │ Alpha (α): 16                  │                │
+│  │ Dropout: 0.05                  │ Dropout: 0.1                   │                │
+│  │ Targets: 7 modules             │ Targets: qkv, proj             │                │
+│  │ Trainable: 32.8M (0.76%)       │ Trainable: 238K (0.87%)        │                │
+│  │ Adapter Size: ~130 MB          │ Adapter Size: ~1 MB            │                │
+│  └────────────────────────────────┴────────────────────────────────┘                │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 7. Agentic Orchestration Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        AGENTIC ORCHESTRATION STATE MACHINE                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  AgentState STRUCTURE                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │ {                                                                            │    │
+│  │   image_path: str,           modality: str,          detections: List,      │    │
+│  │   user_query: str,           modality_confidence: f, segmentations: List,   │    │
+│  │   image_quality: float,      current_thought: str,   heatmap: ndarray,      │    │
+│  │   messages: List[Dict],      final_report: str,      validation_status: str,│    │
+│  │   warnings: List[str],       error: Optional[str],   processing_time: float │    │
+│  │ }                                                                            │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  DECISION FLOW                                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │                    ┌─────────┐                                               │    │
+│  │                    │  START  │                                               │    │
+│  │                    └────┬────┘                                               │    │
+│  │                         ▼                                                    │    │
+│  │              ┌──────────────────────┐                                        │    │
+│  │              │ Quality Check <0.3?  │───YES──▶ REJECT                        │    │
+│  │              └──────────┬───────────┘                                        │    │
+│  │                         │NO                                                  │    │
+│  │                         ▼                                                    │    │
+│  │              ┌──────────────────────┐                                        │    │
+│  │              │ Detect Modality      │                                        │    │
+│  │              │ (xray/mri/ct/ultra)  │                                        │    │
+│  │              └──────────┬───────────┘                                        │    │
+│  │                         ▼                                                    │    │
+│  │              ┌──────────────────────┐                                        │    │
+│  │              │ Select Prompt        │                                        │    │
+│  │              │ (57 pathology class) │                                        │    │
+│  │              └──────────┬───────────┘                                        │    │
+│  │                         ▼                                                    │    │
+│  │              ┌──────────────────────┐                                        │    │
+│  │              │ MedGemma Detection   │                                        │    │
+│  │              │ (with LoRA adapter)  │                                        │    │
+│  │              └──────────┬───────────┘                                        │    │
+│  │                         ▼                                                    │    │
+│  │              ┌──────────────────────┐                                        │    │
+│  │              │ Findings detected?   │───NO──▶ Report "Normal"               │    │
+│  │              └──────────┬───────────┘              │                         │    │
+│  │                         │YES                       │                         │    │
+│  │                         ▼                          │                         │    │
+│  │              ┌──────────────────────┐              │                         │    │
+│  │              │ Generate Heatmap     │              │                         │    │
+│  │              │ Extract Boxes        │              │                         │    │
+│  │              └──────────┬───────────┘              │                         │    │
+│  │                         ▼                          │                         │    │
+│  │              ┌──────────────────────┐              │                         │    │
+│  │              │ UNLOAD MedGemma      │              │                         │    │
+│  │              │ LOAD SAM2            │              │                         │    │
+│  │              └──────────┬───────────┘              │                         │    │
+│  │                         ▼                          │                         │    │
+│  │              ┌──────────────────────┐              │                         │    │
+│  │              │ SAM2 Segmentation    │              │                         │    │
+│  │              └──────────┬───────────┘              │                         │    │
+│  │                         ▼                          │                         │    │
+│  │              ┌──────────────────────┐              │                         │    │
+│  │              │ Clinical Validation  │◀─────────────┘                         │    │
+│  │              └──────────┬───────────┘                                        │    │
+│  │                         ▼                                                    │    │
+│  │              ┌──────────────────────┐                                        │    │
+│  │              │ Generate Report +    │                                        │    │
+│  │              │ Save Visualization   │                                        │    │
+│  │              └──────────┬───────────┘                                        │    │
+│  │                         ▼                                                    │    │
+│  │                    ┌─────────┐                                               │    │
+│  │                    │  END    │                                               │    │
+│  │                    └─────────┘                                               │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  VRAM MANAGEMENT (8GB Constraint - Model Swapping)                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │  ├──────────── MedGemma (~6GB) ──────────────┼──── SAM2 (~2GB) ────┤        │    │
+│  │  │                                           │                      │        │    │
+│  │  │  Stages -1 to 4                           │  Stages 5-7          │        │    │
+│  │  │  • Quality Check                          │  • Segmentation      │        │    │
+│  │  │  • Modality Detection                     │  • Mask Generation   │        │    │
+│  │  │  • Knowledge Retrieval           SWAP     │  • Validation        │        │    │
+│  │  │  • Detection                     POINT    │  • Reporting         │        │    │
+│  │  │  • Explainability                  ▼      │                      │        │    │
+│  │  │                            ┌───────────┐  │                      │        │    │
+│  │  │                            │gc.collect │  │                      │        │    │
+│  │  │                            │cuda.empty │  │                      │        │    │
+│  │  │                            └───────────┘  │                      │        │    │
+│  │                                                                              │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 8. Edge Deployment Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                    EDGE DEPLOYMENT: RASPBERRY PI 5 + HAILO-10H                       │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  HARDWARE ARCHITECTURE                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │                     RASPBERRY PI 5 (8GB RAM)                         │    │    │
+│  │  │                                                                      │    │    │
+│  │  │   ┌──────────────────────────────────────────────────────────────┐  │    │    │
+│  │  │   │                ARM Cortex-A76 (Quad-core @ 2.4GHz)           │  │    │    │
+│  │  │   │                                                              │  │    │    │
+│  │  │   │  ┌────────────────────┐      ┌────────────────────┐         │  │    │    │
+│  │  │   │  │   MedGemma 4B      │      │    Orchestrator    │         │  │    │    │
+│  │  │   │  │   (INT4 CPU)       │      │    (Python)        │         │  │    │    │
+│  │  │   │  │                    │      │                    │         │  │    │    │
+│  │  │   │  │ Inference: 30-60s  │      │ • State Management │         │  │    │    │
+│  │  │   │  │ Memory: ~4GB       │      │ • Decision Routing │         │  │    │    │
+│  │  │   │  └────────────────────┘      └────────────────────┘         │  │    │    │
+│  │  │   └──────────────────────────────────────────────────────────────┘  │    │    │
+│  │  │                              │                                       │    │    │
+│  │  │                    PCIe Gen 3 x1 (8 GT/s)                           │    │    │
+│  │  │                              │                                       │    │    │
+│  │  │   ┌──────────────────────────▼───────────────────────────────────┐  │    │    │
+│  │  │   │                   HAILO AI HAT+2 (Hailo-10H)                 │  │    │    │
+│  │  │   │                                                              │  │    │    │
+│  │  │   │   ┌──────────────────────────────────────────────────────┐  │  │    │    │
+│  │  │   │   │           Neural Processing Unit - 40 TOPS            │  │  │    │    │
+│  │  │   │   │                                                       │  │  │    │    │
+│  │  │   │   │  ┌─────────────────────────────────────────────────┐ │  │  │    │    │
+│  │  │   │   │  │        SAM2-Tiny Encoder (Compiled HEF)         │ │  │  │    │    │
+│  │  │   │   │  │        Inference: ~25-50ms per mask             │ │  │  │    │    │
+│  │  │   │   │  └─────────────────────────────────────────────────┘ │  │  │    │    │
+│  │  │   │   └──────────────────────────────────────────────────────┘  │  │    │    │
+│  │  │   └──────────────────────────────────────────────────────────────┘  │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  MODEL COMPILATION PIPELINE                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │  ┌───────────┐    ┌───────────┐    ┌───────────┐    ┌───────────┐          │    │
+│  │  │ PyTorch   │───▶│   ONNX    │───▶│  Hailo    │───▶│   HEF     │          │    │
+│  │  │ SAM2-Tiny │    │ opset=17  │    │ Compiler  │    │ Binary    │          │    │
+│  │  │ encoder   │    │           │    │ INT8 quant│    │ Optimized │          │    │
+│  │  └───────────┘    └───────────┘    └───────────┘    └───────────┘          │    │
+│  │                                                                              │    │
+│  │  Command: hailo compile sam2_encoder.onnx --hw-arch hailo10h                │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  EDGE INFERENCE TIMELINE                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │  ┌─ CPU (ARM) ─────────────────────────────────────────────────────────┐    │    │
+│  │  │                                                                      │    │    │
+│  │  │  1. Quality Check (instant)                                          │    │    │
+│  │  │  2. Modality Detection via MedGemma (~30s) [INT4]                    │    │    │
+│  │  │  3. Pathology Detection via MedGemma (~30s) [INT4]                   │    │    │
+│  │  │                                                                      │    │    │
+│  │  └──────────────────────────────────────────────────────────────────────┘    │    │
+│  │                              │                                               │    │
+│  │                              ▼                                               │    │
+│  │  ┌─ NPU (Hailo-10H) ─────────────────────────────────────────────────────┐  │    │
+│  │  │                                                                        │  │    │
+│  │  │  4. SAM2 Encoder inference (~25ms per call) [INT8 HEF]                │  │    │
+│  │  │                                                                        │  │    │
+│  │  └────────────────────────────────────────────────────────────────────────┘  │    │
+│  │                              │                                               │    │
+│  │                              ▼                                               │    │
+│  │  ┌─ CPU (Post-processing) ───────────────────────────────────────────────┐  │    │
+│  │  │                                                                        │  │    │
+│  │  │  5. Mask Decoding (~10ms)                                              │  │    │
+│  │  │  6. Report Generation (instant) [Rule-based]                          │  │    │
+│  │  │                                                                        │  │    │
+│  │  └────────────────────────────────────────────────────────────────────────┘  │    │
+│  │                                                                              │    │
+│  │  Total Latency: ~60-90 seconds per image                                    │    │
+│  │  (Dominated by MedGemma CPU inference)                                      │    │
+│  │                                                                              │    │
+│  │  PRIVACY BENEFITS:                                                           │    │
+│  │  • All processing on-device • No cloud required • HIPAA-compliant           │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+│  FILE TRANSFER (Windows PC → Raspberry Pi)                                           │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                              │    │
+│  │  Windows PC                                    Raspberry Pi                  │    │
+│  │  ┌─────────────────────────┐     SCP/USB      ┌─────────────────────────┐   │    │
+│  │  │ C:\Users\hp\.cache\     │ ──────────────▶  │ ~/.cache/huggingface/   │   │    │
+│  │  │ huggingface\hub\        │     8.6GB        │ hub/                    │   │    │
+│  │  │ models--google--        │                  │ models--google--        │   │    │
+│  │  │ medgemma-1.5-4b-it\     │                  │ medgemma-1.5-4b-it\     │   │    │
+│  │  └─────────────────────────┘                  └─────────────────────────┘   │    │
+│  │                                                                              │    │
+│  │  ┌─────────────────────────┐                  ┌─────────────────────────┐   │    │
+│  │  │ D:\GemSAM\checkpoints\  │ ──────────────▶  │ ~/GemSAM/checkpoints\   │   │    │
+│  │  │ production\             │     ~170MB       │ production\             │   │    │
+│  │  └─────────────────────────┘                  └─────────────────────────┘   │    │
+│  │                                                                              │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 9. Parameter Reference Tables
+
+### 9.1 Model Parameters
+
+| Component | Parameter | Value | Description |
+|-----------|-----------|-------|-------------|
+| **MedGemma 1.5** | Total Params | 4.3B | Full model size |
+| | Vision Encoder | SigLIP-400M | Image feature extraction |
+| | Language Model | Gemma 3 (~2B) | Text generation |
+| | MM Projector | ~10M | Vision-language alignment |
+| | Input Resolution | 896×896 | Image input size |
+| | Visual Tokens | 256 | After pooling (16×16) |
+| | Quantization | NF4 | 4-bit normal float |
+| **SAM2** | Total Params | 32M | Tiny variant |
+| | Image Encoder | Hiera-Tiny (27M) | Hierarchical features |
+| | Prompt Encoder | ~1M | Box/point encoding |
+| | Mask Decoder | ~4M | Mask generation |
+| | Input Resolution | 1024×1024 | Image input size |
+| | Output Masks | 3 | Multi-mask output |
+
+### 9.2 LoRA Configuration
+
+| Parameter | MedGemma | SAM2 |
+|-----------|----------|------|
+| Rank (r) | 16 | 8 |
+| Alpha (α) | 32 | 16 |
+| Dropout | 0.05 | 0.1 |
+| Target Modules | q,k,v,o,gate,up,down_proj | qkv, proj |
+| Trainable Params | 32.8M (0.76%) | 238K (0.87%) |
+| Adapter Size | ~130 MB | ~1 MB |
+
+### 9.3 Training Hyperparameters
+
+| Parameter | TURBO | BALANCED | FULL | EXTENDED |
+|-----------|-------|----------|------|----------|
+| Images | 1,000 | 3,000 | 10,500 | 10,500 |
+| Epochs | 1 | 2 | 1 | 3 |
+| LoRA Rank | 4 | 8 | 16 | 16 |
+| Batch Size | 4 | 4 | 2 | 2 |
+| Grad Accum | 4 | 4 | 8 | 8 |
+| Effective Batch | 16 | 16 | 16 | 16 |
+| Learning Rate | 5e-5 | 3e-5 | 2e-5 | 2e-5 |
+| Weight Decay | 0.01 | 0.01 | 0.01 | 0.01 |
+| Warmup Steps | 50 | 100 | 100 | 100 |
+| Max Grad Norm | 1.0 | 1.0 | 1.0 | 1.0 |
+| Training Time | ~1h | ~3h | ~14-24h | ~45h |
+
+### 9.4 Memory Requirements
+
+| Configuration | RAM Usage | GPU VRAM | Speed | Stability |
+|---------------|-----------|----------|-------|-----------|
+| Disk Cache (Default) | ~12GB | 6GB | ~12-15s/batch | HIGH |
+| Stream Mode | ~10GB | 6GB | ~20s/batch | MEDIUM |
+| RAM Cache | 28-30GB | 6GB | ~10s/batch | LOW* |
+
+*RAM cache causes 10x slowdown on 32GB systems due to memory paging
+
+### 9.5 Modality Classes
+
+| Modality | Classes | Examples |
+|----------|---------|----------|
+| X-ray | 22 | Cardiomegaly, Pneumonia, Pleural effusion, Nodule, Mass |
+| MRI | 16 | Glioma, Meningioma, Pituitary adenoma, Hemorrhage, Edema |
+| CT | 11 | Tumor, Hemorrhage, Infarction, Fracture, Calcification |
+| Ultrasound | 8 | Benign mass, Malignant mass, Cyst, Calcification |
+| **Total** | **57** | All unique pathology classes |
+
+### 9.6 Visualization Configuration
+
+| Modality | Colormap | Alpha | Threshold | Blur Kernel |
+|----------|----------|-------|-----------|-------------|
+| X-ray | INFERNO | 0.50 | 0.30 | (7, 7) |
+| MRI | PLASMA | 0.60 | 0.25 | (5, 5) |
+| CT | MAGMA | 0.55 | 0.28 | (5, 5) |
+| Ultrasound | VIRIDIS | 0.45 | 0.35 | (5, 5) |
+
+### 9.7 Confidence & ROI Coverage
+
+| Confidence Level | Threshold | Clinical Use |
+|------------------|-----------|--------------|
+| HIGH | >0.90 | Reliable for clinical decision support |
+| MODERATE | 0.70-0.90 | Requires clinician review |
+| LOW | 0.50-0.70 | Needs verification |
+| UNCERTAIN | <0.50 | Expert review required |
+
+| ROI Coverage | Interpretation | Reliability |
+|--------------|----------------|-------------|
+| >0.8 | Excellent alignment | High |
+| 0.5-0.8 | Good alignment | Moderate |
+| 0.3-0.5 | Partial alignment | Low |
+| <0.3 | Poor alignment | Verify |
+
+---
+
+## 10. File Structure Reference
+
+```
+GemSAM/
+├── src/
+│   ├── orchestrator.py           # GemSAMOrchestrator (main pipeline)
+│   ├── medgemma_wrapper.py       # MedGemma VLM wrapper
+│   ├── medsam_wrapper.py         # SAM2 segmentation wrapper
+│   ├── explainability.py         # Attention visualization
+│   ├── clinical_intelligence.py  # Quality assessment, validation
+│   ├── knowledge_base.py         # RAG retrieval
+│   ├── agent_state.py            # State management
+│   ├── config.py                 # Configuration constants
+│   ├── prompts/
+│   │   └── modality_prompts.py   # 57 pathology class definitions
+│   ├── data/
+│   │   └── factory.py            # Dataset loaders
+│   └── train/
+│       ├── train_medgemma.py     # MedGemma LoRA training
+│       └── train_sam2_medical.py # SAM2 LoRA training
+├── checkpoints/
+│   └── production/
+│       ├── medgemma/
+│       │   └── detection/        # MedGemma LoRA adapter (~130MB)
+│       └── sam2/
+│           └── final/            # SAM2 LoRA adapter (~1MB)
+├── edge/
+│   ├── export_sam2_hailo.py      # ONNX export for Hailo
+│   ├── setup_raspberry_pi.sh     # Pi setup script
+│   ├── requirements_edge.txt     # Edge dependencies
+│   └── quick_demo.py             # Lightweight demo
+├── demo/
+│   └── gradio_app.py             # Interactive web interface
+└── docs/
+    └── WHITEPAPER.md             # Technical documentation
+```
+
+---
+
+*Document Version: 2.1 | Last Updated: February 24, 2026 | GemSAM Framework | For Whitepaper Diagram Creation*
+

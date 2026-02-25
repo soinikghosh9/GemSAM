@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Quick MedGamma Edge Demo for Raspberry Pi 5 + Hailo-10H.
+Quick GemSAM Edge Demo for Raspberry Pi 5 + Hailo-10H.
+
+GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis
+on Edge using MedGemma-1.5 and SAM2
 
 This is a lightweight demo that works even without full MedGemma model.
 Use this for quick testing and video recording.
@@ -156,7 +159,7 @@ def create_visualization(image_path: str, results: dict, output_path: str = None
         draw.text((box[0]+5, box[1]-22), label, fill="white", font=font_small)
 
     # Draw header
-    header = f"MedGamma Edge | {results['modality']} | {'ABNORMAL' if results['is_abnormal'] else 'NORMAL'}"
+    header = f"GemSAM Edge | {results['modality']} | {'ABNORMAL' if results['is_abnormal'] else 'NORMAL'}"
     draw.rectangle([0, 0, img.width, 35], fill="black")
     draw.text((10, 8), header, fill="white", font=font)
 
@@ -174,7 +177,7 @@ def create_visualization(image_path: str, results: dict, output_path: str = None
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MedGamma Edge Quick Demo"
+        description="GemSAM Edge Quick Demo"
     )
     parser.add_argument("--image", "-i", required=True, help="Path to medical image")
     parser.add_argument("--output", "-o", help="Output visualization path")
@@ -184,7 +187,7 @@ def main():
 
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║          MedGamma Edge Quick Demo                            ║
+║          GemSAM Edge Quick Demo                            ║
 ║          Raspberry Pi 5 + Hailo-10H (40 TOPS)                ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
@@ -202,8 +205,8 @@ def main():
     if args.full:
         # Try full inference
         try:
-            from edge_inference import MedGammaEdgePipeline
-            pipeline = MedGammaEdgePipeline()
+            from edge_inference import GemSAMEdgePipeline
+            pipeline = GemSAMEdgePipeline()
             result = pipeline.analyze(args.image)
             results = {
                 "modality": result.modality,

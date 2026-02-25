@@ -252,12 +252,12 @@ def create_stopping_criteria(tokenizer, task: str = "detection", input_len: int 
     # Always add stop string criteria (with input_len to avoid checking prompt)
     criteria.append(StopStringCriteria(tokenizer, input_len=input_len))
 
-    # Time limit: Pi CPU inference is slow (~30-60s per image)
-    # Use 120s for detection (complex JSON), 60s for other tasks
-    max_time = 120.0 if task == "detection" else 60.0
+    # Always add time limit (30s for short tasks, 90s for complex detection JSON)
+    # Increased from 15s/60s to allow for model warmup during evaluation
+    max_time = 90.0 if task == "detection" else 30.0
     criteria.append(MaxTimeCriteria(max_seconds=max_time))
 
-    # Add repetition detection — but NOT for detection task
+    # Add repetition detection  but NOT for detection task
     # Detection JSON has legitimate repeated patterns like {"class":...,"box":...}
     # that falsely trigger the regex-based repetition detector
     if task != "detection":

@@ -36,6 +36,9 @@ class MedSAMWrapper:
         Args:
             adapter_path: Override adapter path (takes precedence over __init__ path)
         """
+        if self.model is not None:
+            return
+        
         # Use provided path or fall back to instance path
         adapter_path = adapter_path or self.adapter_path
 

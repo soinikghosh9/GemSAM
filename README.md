@@ -6,7 +6,7 @@
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
 
 > **Kaggle MedGemma Impact Challenge Submission**
-> Deadline: February 24, 2026
+> Google DeepMind
 
 ---
 

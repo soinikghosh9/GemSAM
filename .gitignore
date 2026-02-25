@@ -26,16 +26,20 @@ validation_data/
 test_data/
 
 # ─── Model Weights (too large for GitHub) ───
-# SAM2 base model (~155 MB)
-checkpoints/sam2_hiera_tiny.pt
-
-# LoRA adapters (~131 MB each, use Git LFS or HuggingFace Hub)
-checkpoints/production/**/adapter_model.safetensors
+/checkpoints/
+**/adapter_model.safetensors
+*.pt
+*.safetensors
+*.bin
 
 # Edge compiled models
-edge/models/*.hef
-edge/models/*.onnx
-edge/models/*.onnx.data
+/edge/models/
+/edge/sam\ hef/
+*.hef
+*.onnx
+*.onnx.data
+*.alls
+*.bin
 
 # ─── Logs & Generated Output ───
 *.log
@@ -58,3 +62,8 @@ Thumbs.db
 
 # ─── Misc ───
 .dummy
+MedgammaPi1/
+archive/
+__pycache__/
+*.tmp
+temp_*

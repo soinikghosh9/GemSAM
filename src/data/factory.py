@@ -18,11 +18,11 @@ class MedicalDatasetFactory:
     def __init__(self, base_data_dir="medical_data"):
         self.base_dir = base_data_dir
 
-    def get_loader(self, dataset_name, task, batch_size=4, split="train", transformer=None):
+    def get_loader(self, dataset_name, task, batch_size=4, split="train", transformer=None, abnormal_only=False):
         dataset_name = dataset_name.lower().replace("-", "_").replace(" ", "_")
         
         if dataset_name == "vindr":
-            return self._load_vindr(task, batch_size, split, transformer)
+            return self._load_vindr(task, batch_size, split, transformer, abnormal_only)
         elif dataset_name == "nih" or dataset_name == "nih_chest_xray":
             return self._load_nih(task, batch_size, split, transformer)
         elif dataset_name == "kaggle" or dataset_name == "kaggle_pneumonia":
@@ -131,13 +131,13 @@ class MedicalDatasetFactory:
             num_workers=0  # Avoid issues on Windows
         )
 
-    def _load_vindr(self, task, batch_size, split, transformer):
+    def _load_vindr(self, task, batch_size, split, transformer, abnormal_only=False):
         """
         VinDr-CXR for Detection tasks.
         """
         data_dir = os.path.join(self.base_dir, "vinbigdata-chest-xray")
         return DataLoader(
-            VinDrCXRLoader(data_dir, split=split, transformer=transformer),
+            VinDrCXRLoader(data_dir, split=split, transformer=transformer, abnormal_only=abnormal_only),
             batch_size=batch_size,
             shuffle=(split == "train"),
             collate_fn=self._collate_fn,
@@ -189,10 +189,11 @@ class MedicalDatasetFactory:
         return {key: [d[key] for d in batch] for key in keys}
 
 class VinDrCXRLoader(Dataset):
-    def __init__(self, root_dir, split="train", transformer=None):
+    def __init__(self, root_dir, split="train", transformer=None, abnormal_only=False):
         self.root_dir = root_dir
         self.split = split
         self.transformer = transformer
+        self.abnormal_only = abnormal_only
         # Use strict experiment splits
         self.annotations_file = os.path.join(root_dir, f"{split}_split.csv")
         
@@ -207,20 +208,31 @@ class VinDrCXRLoader(Dataset):
 
         # Fallback to train.csv only if split file missing (Backwards compatibility)
         if not os.path.exists(self.annotations_file):
-            if split == "train":
-                self.annotations_file = os.path.join(root_dir, "train.csv")
-            else:
-                # For val/test, if split missing, maybe use train.csv but filter? 
-                # For now, just warn or default to empty
-                pass
+             if split == "train":
+                  self.annotations_file = os.path.join(root_dir, "train.csv")
+             else:
+                  # For val/test, if split missing, maybe use train.csv but filter? 
+                  # For now, just warn or default to empty
+                  pass
 
-        self.data_map = {}  # Initialize as dict, not list
+        self.data_map = []
         if os.path.exists(self.annotations_file):
             print(f"[{split.upper()}] Loading annotations from {self.annotations_file}")
             df = pd.read_csv(self.annotations_file)
             self.data_map = df.groupby('image_id')
         
-        self.image_ids = list(self.data_map.groups.keys()) if hasattr(self.data_map, 'groups') else []
+        self.image_ids = list(self.data_map.groups.keys())
+        
+        # Apply abnormal_only filter
+        if self.abnormal_only:
+            original_count = len(self.image_ids)
+            filtered_ids = []
+            for img_id in self.image_ids:
+                group = self.data_map.get_group(img_id)
+                if any(row['class_name'] != 'No finding' for _, row in group.iterrows()):
+                    filtered_ids.append(img_id)
+            self.image_ids = filtered_ids
+            print(f"[{self.split.upper()}] Filtered for abnormal-only samples: {len(self.image_ids)}/{original_count}")
         # Load metadata if available
         self.meta_map = {}
         self.meta_file = os.path.join(root_dir, "train_meta.csv")
@@ -280,12 +292,32 @@ class VinDrCXRLoader(Dataset):
         # Get original dimensions for normalization
         orig_w, orig_h = self.meta_map.get(image_id, (None, None))
         
-        # If metadata missing, try to infer from loaded image IF it was original
-        if orig_w is None and not self.use_preprocessed:
-             orig_w, orig_h = image.size
+        # If metadata missing, MUST infer from image even if preprocessed or not
+        if orig_w is None:
+             # Look for original image to get TRUE dimensions
+             # Even if using preprocessed, we need original sizes for coordinate mapping
+             orig_img_path = os.path.join(self.root_dir, "train", f"{image_id}.jpg")
+             if not os.path.exists(orig_img_path):
+                  orig_img_path = os.path.join(self.root_dir, "train", f"{image_id}.dicom")
+             
+             if os.path.exists(orig_img_path):
+                 try:
+                     if orig_img_path.endswith('.dicom'):
+                         import pydicom
+                         ds = pydicom.dcmread(orig_img_path)
+                         orig_w, orig_h = ds.Columns, ds.Rows
+                     else:
+                         with Image.open(orig_img_path) as tmp_img:
+                             orig_w, orig_h = tmp_img.size
+                 except:
+                     pass
+             
+             # Final fallback: if cannot find original, use current image size
+             if orig_w is None:
+                 orig_w, orig_h = image.size
 
         # CRITICAL FIX: Load boxes for ALL splits, not just train
-        if hasattr(self.data_map, 'groups') and image_id in self.data_map.groups:
+        if image_id in self.data_map.groups:
             group = self.data_map.get_group(image_id)
             for _, row in group.iterrows():
                 if row['class_name'] != 'No finding':
@@ -776,6 +808,14 @@ class BrainTumorMultimodalLoader(Dataset):
         print(f"[DEBUG] BrainTumorMultimodal: root_dir = {root_dir}")
         print(f"[DEBUG] BrainTumorMultimodal: search_root = {search_root} (exists: {os.path.exists(search_root)})")
 
+        # List contents of search_root if it exists
+        if os.path.exists(search_root):
+            try:
+                contents = os.listdir(search_root)
+                print(f"[DEBUG] BrainTumorMultimodal: search_root contents = {contents}")
+            except Exception as e:
+                print(f"[DEBUG] BrainTumorMultimodal: Error listing search_root: {e}")
+
         # Walk through the directory looking for modality folders
         for modality, possible_names in modality_dirs.items():
             for dir_name in possible_names:
@@ -790,70 +830,148 @@ class BrainTumorMultimodalLoader(Dataset):
                                     "path": os.path.join(root, f),
                                     "modality": modality
                                 })
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-
-        try:
-            image = Image.open(sample["path"]).convert("RGB")
-        except Exception as e:
-            image = Image.new('RGB', (448, 448))
-
-        if self.transformer:
-            image = self.transformer(image)
-
-        return {
-            "image": image,
-            "modality": sample["modality"],
-            "class_name": sample["modality"]
-        }
-
-class BUSIDataset(Dataset):
-    """
-    Breast Ultrasound Images Dataset (BUSI).
-    Binary screening: normal vs benign/malignant.
-    """
-    def __init__(self, root_dir, split="train", task="screening", transformer=None):
-        self.root_dir = root_dir
-        self.split = split
-        self.task = task
-        self.transformer = transformer
-        self.samples = []
+                    break  # Found this modality, no need to check other names
         
-        # Load images from classes
-        for cls in ["normal", "benign", "malignant"]:
-            cls_dir = os.path.join(root_dir, cls)
-            if os.path.exists(cls_dir):
-                for f in os.listdir(cls_dir):
-                    if f.lower().endswith(('.png', '.jpg', '.jpeg')) and "_mask" not in f:
-                        self.samples.append({
-                            "path": os.path.join(cls_dir, f),
-                            "label": cls,
-                            "is_healthy": cls == "normal"
-                        })
-        
-        # Split (mock)
+        # Split: 80/20
         cutoff = int(len(self.samples) * 0.8)
         if split == "train":
             self.samples = self.samples[:cutoff]
         else:
             self.samples = self.samples[cutoff:]
+        
+        modality_counts = {}
+        for s in self.samples:
+            modality_counts[s["modality"]] = modality_counts.get(s["modality"], 0) + 1
+        print(f"[{split.upper()}] Brain Tumor Multimodal: Loaded {len(self.samples)} samples {modality_counts}")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        image = Image.open(sample["path"]).convert("RGB")
+        
+        try:
+            image = Image.open(sample["path"]).convert("RGB")
+        except Exception as e:
+            image = Image.new('RGB', (448, 448))
+        
         if self.transformer:
             image = self.transformer(image)
         
         return {
             "image": image,
-            "label": sample["label"],
-            "is_healthy": sample["is_healthy"],
-            "modality": "ultrasound"
+            "modality": sample["modality"]
         }
+
+
+class BUSIDataset(Dataset):
+    """
+    BUSI: Breast Ultrasound Images with Ground Truth.
+    For BLIND TESTING of classification and segmentation.
+
+    Categories: benign, malignant, normal
+    Each image has corresponding mask(s) for segmentation.
+
+    Paper: Al-Dhabyani et al. "Dataset of breast ultrasound images" Data in Brief, 2020.
+    """
+    def __init__(self, root_dir, split="test", task="classification", transformer=None, image_size=1024):
+        self.root_dir = root_dir
+        self.split = split
+        self.task = task  # "classification", "segmentation", or "both"
+        self.transformer = transformer
+        self.image_size = image_size
+        self.samples = []
+
+        # Class mapping
+        self.class_names = ["normal", "benign", "malignant"]
+        self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
+
+        # Load samples from each category
+        for class_name in self.class_names:
+            class_dir = os.path.join(root_dir, class_name)
+            if not os.path.exists(class_dir):
+                continue
+
+            # Group images with their masks
+            files = os.listdir(class_dir)
+            image_files = [f for f in files if not '_mask' in f and f.endswith('.png')]
+
+            for img_file in image_files:
+                img_path = os.path.join(class_dir, img_file)
+
+                # Find corresponding mask(s)
+                base_name = img_file.replace('.png', '')
+                mask_files = [f for f in files if f.startswith(base_name + '_mask')]
+                mask_paths = [os.path.join(class_dir, m) for m in mask_files]
+
+                self.samples.append({
+                    "image_path": img_path,
+                    "mask_paths": mask_paths,  # May have multiple masks
+                    "class_name": class_name,
+                    "class_idx": self.class_to_idx[class_name]
+                })
+
+        # Shuffle and split (80/20 for train/test, but we use test for blind evaluation)
+        np.random.seed(42)  # Reproducible
+        indices = np.random.permutation(len(self.samples))
+        cutoff = int(len(self.samples) * 0.8)
+
+        if split == "train":
+            self.samples = [self.samples[i] for i in indices[:cutoff]]
+        else:  # test/val for blind testing
+            self.samples = [self.samples[i] for i in indices[cutoff:]]
+
+        # Count per class
+        class_counts = {}
+        for s in self.samples:
+            c = s["class_name"]
+            class_counts[c] = class_counts.get(c, 0) + 1
+
+        print(f"[BUSI {split.upper()}] Loaded {len(self.samples)} samples: {class_counts}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+
+        # Load image
+        image = Image.open(sample["image_path"]).convert("RGB")
+        orig_size = image.size  # (W, H)
+
+        # Load and combine masks (some images have multiple mask annotations)
+        combined_mask = None
+        if sample["mask_paths"]:
+            for mask_path in sample["mask_paths"]:
+                mask = Image.open(mask_path).convert("L")
+                mask_array = np.array(mask)
+                if combined_mask is None:
+                    combined_mask = mask_array
+                else:
+                    combined_mask = np.maximum(combined_mask, mask_array)
+            combined_mask = (combined_mask > 0).astype(np.float32)
+        else:
+            # Normal images may not have masks
+            combined_mask = np.zeros((image.size[1], image.size[0]), dtype=np.float32)
+
+        # Resize for segmentation task
+        if self.task in ["segmentation", "both"]:
+            image_resized = image.resize((self.image_size, self.image_size))
+            mask_pil = Image.fromarray((combined_mask * 255).astype(np.uint8))
+            mask_resized = mask_pil.resize((self.image_size, self.image_size), resample=Image.NEAREST)
+            combined_mask = np.array(mask_resized) / 255.0
+
+        # Apply transformer if provided
+        if self.transformer:
+            image = self.transformer(image_resized if self.task in ["segmentation", "both"] else image)
+
+        result = {
+            "image": image if self.transformer else (image_resized if self.task in ["segmentation", "both"] else image),
+            "class_name": sample["class_name"],
+            "class_idx": sample["class_idx"],
+            "mask": torch.from_numpy(combined_mask).unsqueeze(0) if combined_mask is not None else None,
+            "image_path": sample["image_path"],
+            "orig_size": orig_size
+        }
+
+        return result
