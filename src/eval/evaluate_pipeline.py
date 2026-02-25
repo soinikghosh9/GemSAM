@@ -35,7 +35,7 @@ import argparse
 # Adapter resolution: maps task -> correct stage adapter directory
 # =====================================================================
 TASK_TO_ADAPTER = {
-    "detection": "detection",
+    "detection": "final",  # User says final has lower loss
     "vqa": "vqa",
     "screening": "screening",
     "modality": "modality",
@@ -96,7 +96,13 @@ class PipelineEvaluator:
 
         # Priority 2: Task-specific adapter
         task_adapter_name = TASK_TO_ADAPTER.get(args.task, args.task)
-        task_adapter_path = os.path.join(args.checkpoint, "medgemma", task_adapter_name)
+        
+        # Check top-level first
+        task_adapter_path = os.path.join(args.checkpoint, task_adapter_name)
+        if not os.path.exists(os.path.join(task_adapter_path, "adapter_config.json")):
+            # Check legacy medgemma subfolder
+            task_adapter_path = os.path.join(args.checkpoint, "medgemma", task_adapter_name)
+
         if os.path.exists(task_adapter_path) and os.path.exists(os.path.join(task_adapter_path, "adapter_config.json")):
             print(f"Found task-specific adapter for '{args.task}': {task_adapter_path}")
             return task_adapter_path
