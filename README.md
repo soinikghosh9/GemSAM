@@ -14,6 +14,9 @@
 
 **GemSAM** is an **agentic framework** for explainable multi-modal medical image analysis that combines vision-language understanding with precise image segmentation. The system integrates **MedGemma 1.5** (a 4B parameter medical vision-language model) as the cognitive reasoning engine ("Brain") with **SAM 2** (Segment Anything Model 2) as the precise segmentation module ("Hands"), orchestrated through an agentic architecture that mimics clinical decision-making workflows.
 
+<img width="1401" height="1132" alt="Untitled Diagram drawio" src="https://github.com/user-attachments/assets/82a78fce-f0f3-4478-8cc7-2edcc55673c7" />
+
+
 ### Key Features (v2.1)
 
 | Feature | Description |
@@ -683,10 +686,10 @@ python edge/edge_inference.py --image test.jpg
 
 ```bibtex
 @software{medgamma2026,
-    title={MedGamma: Multi-Agent Clinical AI System for Explainable Medical Image Analysis},
-    author={[Author Name]},
+    title={GemSAM: An Agentic Framework for Explainable Multi-Modal Medical Image Analysis on Edge using MedGemma-1.5 and SAM2},
+    author={[Soinik Ghosh]},
     year={2026},
-    url={https://github.com/[username]/MedGamma},
+    url={https://github.com/soinikghosh9/GemSAM},
     note={Kaggle MedGemma Impact Challenge Submission}
 }
 ```
