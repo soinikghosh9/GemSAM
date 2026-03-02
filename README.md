@@ -17,16 +17,20 @@
 <img width="1401" height="1132" alt="Untitled Diagram drawio" src="https://github.com/user-attachments/assets/82a78fce-f0f3-4478-8cc7-2edcc55673c7" />
 
 
-### Key Features (v2.1)
+### Key Features (v2.2)
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-Modal Support** | Handles Chest X-rays, Brain MRI, CT scans, and Ultrasound |
-| **Modality-First Pipeline** | Automatically detects imaging modality before analysis |
-| **Modality-Specific Detection** | Uses appropriate clinical vocabulary for each modality |
+| **Multi-Modal Support** | Chest X-rays, Brain MRI, CT scans, Ultrasound with modality-specific prompts |
+| **Modality-First Pipeline** | Auto-detects imaging modality → selects appropriate clinical vocabulary |
+| **Detection Accuracy + Confidence** | Per-image accuracy, per-class P/R/F1, confidence score (0–1), clinical grade (A–D) |
+| **VQA with Prompt Masking** | Model learns only answer tokens; multi-level matching (exact, synonym, Jaccard) |
+| **Adapter-Swap Evaluation** | Base model loaded once; LoRA adapters swapped per stage (3× faster eval) |
 | **Enhanced Explainability** | Gradient-weighted attention maps with ROI validation |
 | **Clinical Intelligence** | Image quality assessment, anatomical validation, recommendations |
 | **Precise Segmentation** | SAM2-based pixel-level region of interest delineation |
+| **JSON Robustness** | Depth-clamped brace/bracket counting handles malformed LLM output |
+| **BICUBIC Consistency** | Train/inference resampling aligned (BICUBIC), ~20% preprocessing speedup |
 
 ### Current Training Status
 
@@ -64,8 +68,10 @@ huggingface-cli login
 # 2. Validate pipeline (6 tests)
 python test_pipeline.py
 
-# 3. END-TO-END TRAINING (recommended command)
-python retrain_detection_optimized.py --full --disk-cache --disk-cache-dir D:\medgamma_cache
+# 3. RUN EVERYTHING (train + eval + blind test)
+python run_all.py --all --disk-cache-dir D:\medgamma_cache
+# Quick test: python run_all.py --all --quick
+# Eval only:  python run_all.py --eval-only
 
 # 4. Run demo
 python demo/gradio_app.py
@@ -244,9 +250,9 @@ python retrain_detection_optimized.py --extended --disk-cache
 
 ---
 
-## End-to-End Training Command
+## End-to-End Training, Evaluation & Blind Test
 
-### **RECOMMENDED: Complete Training Pipeline**
+### **Complete 6-Step Pipeline**
 
 ```bash
 # ============================================================
@@ -255,16 +261,26 @@ python retrain_detection_optimized.py --extended --disk-cache
 python test_pipeline.py
 
 # ============================================================
-# STEP 1: PRE-BUILD DISK CACHE (run once, ~30-45 min)
-# This preprocesses all images to SSD for fast training
+# STEP 1: CURRICULUM TRAINING — Screening, Modality, VQA (~2h)
+# Trains LoRA adapters for screening (binary), modality
+# classification, and VQA stages via curriculum learning
+# ============================================================
+python run_curriculum.py --data-dir medical_data --output-dir checkpoints/production
+# Quick test: python run_curriculum.py --quick
+# Single stage: python run_curriculum.py --stage detection
+
+# ============================================================
+# STEP 2: PRE-BUILD DISK CACHE (run once, ~30-45 min)
+# Preprocesses all images to SSD for fast detection training
 # ============================================================
 python retrain_detection_optimized.py \
     --preprocess-cache \
     --disk-cache-dir D:\medgamma_cache
 
 # ============================================================
-# STEP 2: FULL TRAINING (~14-24 hours)
-# Trains MedGemma LoRA on all detection data
+# STEP 3: DETECTION TRAINING (~14-24 hours)
+# Full detection retraining with modality-aware prompts,
+# class-balanced sampling, and prompt length caching
 # ============================================================
 python retrain_detection_optimized.py \
     --full \
@@ -277,33 +293,60 @@ python retrain_detection_optimized.py \
     --lora_r 16
 
 # ============================================================
-# STEP 3: SAM2 SEGMENTATION TRAINING (~10-15 min)
-# Fine-tunes SAM2 for medical image segmentation
+# STEP 4: SAM2 SEGMENTATION TRAINING (~10-15 min)
+# Trains on combined BUSI + SLAKE (~1228 samples)
+# Uses epoch-level early stopping on validation Dice
 # ============================================================
 python -m src.train.train_sam2_medical \
+    --data-dir medical_data \
+    --dataset all \
     --epochs 5 \
-    --batch_size 2 \
+    --batch-size 1 \
     --lr 1e-4
 
 # ============================================================
-# STEP 4: EVALUATION
-# Evaluate all stages of the pipeline
+# STEP 5: MULTI-STAGE EVALUATION (all stages)
+# Reports: accuracy, F1, confidence, clinical grade per stage
 # ============================================================
 python -m src.eval.evaluate_all_stages \
     --checkpoint checkpoints/production \
     --max_samples 200
 
 # ============================================================
-# STEP 5: LAUNCH DEMO
+# STEP 6: BLIND BENCHMARK (multi-modal, unseen data)
+# Evaluates all stages on held-out test splits + MedMNIST v2
+# Sections: screening, modality, detection, VQA, segmentation,
+#           external benchmark (6 MedMNIST subsets)
+# ============================================================
+python blind_benchmark.py \
+    --checkpoint checkpoints/production \
+    --data-dir medical_data \
+    --max-samples 200
+# Results saved to: outputs/blind_benchmark/benchmark_report.json
+
+# ============================================================
+# STEP 7: LAUNCH DEMO
 # ============================================================
 python demo/gradio_app.py
 ```
 
-### **SINGLE COMMAND (if you want one-liner)**
+### **Single Command (all-in-one)**
 
 ```bash
-# All-in-one training (uses defaults, takes ~14-24 hours)
-python retrain_detection_optimized.py --full --disk-cache --disk-cache-dir D:\medgamma_cache && python -m src.train.train_sam2_medical --epochs 5 && python -m src.eval.evaluate_all_stages
+# Runs: validation -> curriculum -> cache -> detection -> SAM2 -> eval -> blind test
+python run_all.py --all --disk-cache-dir D:\medgamma_cache
+
+# Quick test (~1h total, turbo mode)
+python run_all.py --all --quick
+
+# Evaluation + blind test only (no training)
+python run_all.py --eval-only
+
+# Full pipeline but skip curriculum (detection already uses separate adapters)
+python run_all.py --all --skip-curriculum
+
+# Custom detection mode
+python run_all.py --all --detection-mode balanced --no-demo
 ```
 
 ---
@@ -606,13 +649,24 @@ No significant abnormality
 
 ### Multi-Stage Evaluation
 
-| Stage | Metric | Value | Dataset |
-|-------|--------|-------|---------|
-| Screening | Accuracy | 89% | Kaggle Pneumonia |
-| Modality Detection | Accuracy | 100% | Brain Tumor Multimodal |
-| Detection (X-ray) | F1 Score | 0.72 | VinDr-CXR |
-| VQA | Accuracy | 66% | SLAKE |
-| Segmentation | Dice | 0.878 | BUSI |
+| Stage | Primary Metric | Value | Secondary Metrics | Dataset |
+|-------|---------------|-------|-------------------|---------|
+| Screening | Accuracy | 89% | — | Kaggle Pneumonia |
+| Modality | Accuracy | 100% | Per-class acc | Brain Tumor Multimodal |
+| Detection | Overall Acc | — | P/R/F1, IoU, Confidence, Clinical Grade | VinDr-CXR |
+| VQA | Accuracy | 66% | BLEU-1, ROUGE-1 | SLAKE |
+| Segmentation | Dice | 0.878 | — | BUSI |
+
+### Detection Metrics (v2.2)
+
+| Metric | Description |
+|--------|-------------|
+| `image_accuracy` | % images correctly classified as normal/abnormal |
+| `precision` / `recall` / `f1` | Standard detection metrics at IoU > 0.35 |
+| `avg_confidence` | Per-image confidence score (0.0–1.0) |
+| `clinical_grade` | A (≥0.7 clinical-ready), B (≥0.5), C (≥0.3), D (<0.3) |
+| `per_class_accuracy` | P/R/F1 per pathology class (cardiomegaly, consolidation, etc.) |
+| `confidence_distribution` | Count of high (≥0.7) / medium (0.4–0.7) / low (<0.4) images |
 
 ### Training Convergence
 
@@ -711,5 +765,5 @@ Apache 2.0 - See [LICENSE](LICENSE) for details.
 
 ---
 
-*Last Updated: February 23, 2026*
-*MedGamma Framework Version: 2.1*
+*Last Updated: February 28, 2026*
+*MedGamma Framework Version: 2.2*

@@ -93,11 +93,10 @@ class JSONCompleteStoppingCriteria(StoppingCriteria):
         generated_tokens = input_ids[0, self.input_len:]
         decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
-        # CRITICAL: Don't stop on empty findings like {"findings": []}
-        # Only count as complete if JSON contains actual content
+        # Strip and check if it's a valid JSON start/end
         stripped = decoded.strip()
-        if stripped in ('{"findings": []}', '{"findings":[]}', '{ "findings": [] }'):
-            return False  # Force model to keep generating
+        if not stripped.startswith('{') and not stripped.startswith('['):
+            return False
 
         # Look for complete JSON objects in generated text only
         json_complete = self._count_complete_json(decoded)
@@ -134,7 +133,7 @@ class JSONCompleteStoppingCriteria(StoppingCriteria):
                     found_start = True
                 brace_depth += 1
             elif char == '}':
-                brace_depth -= 1
+                brace_depth = max(0, brace_depth - 1)
                 if found_start and brace_depth == 0 and bracket_depth == 0:
                     count += 1
                     found_start = False
@@ -143,7 +142,7 @@ class JSONCompleteStoppingCriteria(StoppingCriteria):
                     found_start = True
                 bracket_depth += 1
             elif char == ']':
-                bracket_depth -= 1
+                bracket_depth = max(0, bracket_depth - 1)
                 if found_start and brace_depth == 0 and bracket_depth == 0:
                     count += 1
                     found_start = False
@@ -252,9 +251,9 @@ def create_stopping_criteria(tokenizer, task: str = "detection", input_len: int 
     # Always add stop string criteria (with input_len to avoid checking prompt)
     criteria.append(StopStringCriteria(tokenizer, input_len=input_len))
 
-    # Always add time limit (30s for short tasks, 90s for complex detection JSON)
-    # Increased from 15s/60s to allow for model warmup during evaluation
-    max_time = 90.0 if task == "detection" else 30.0
+    # Always add time limit
+    # Increased to allow for slower generation and model warmup during evaluation
+    max_time = 180.0 if task == "detection" else 60.0
     criteria.append(MaxTimeCriteria(max_seconds=max_time))
 
     # Add repetition detection  but NOT for detection task
@@ -321,28 +320,51 @@ class VocabularyConstraint:
             "nodule/mass": "Nodule/Mass",
             "opacity": "Lung Opacity",
             "lung opacity": "Lung Opacity",
+            "lung opacities": "Lung Opacity",
+            "opacities": "Lung Opacity",
+            "parenchymal opacity": "Lung Opacity",
             "no finding": "No finding",
-            "no significant abnormality": "No finding",  # Training uses this phrase
+            "no significant abnormality": "No finding",
             "normal": "No finding",
             "healthy": "No finding",
             "fibrosis": "Pulmonary fibrosis",
             "pulmonary fibrosis": "Pulmonary fibrosis",
+            "scarring": "Pulmonary fibrosis",
             "ild": "ILD",
             "interstitial lung disease": "ILD",
+            "reticular markings": "ILD",
             "pneumothorax": "Pneumothorax",
             "cardiomegaly": "Cardiomegaly",
             "enlarged heart": "Cardiomegaly",
+            "enlarged cardiomediastinum": "Cardiomegaly",
             "atelectasis": "Atelectasis",
             "consolidation": "Consolidation",
             "infiltration": "Infiltration",
             "infiltrate": "Infiltration",
+            "infiltrates": "Infiltration",
             "emphysema": "Emphysema",
             "edema": "Edema",
             "pulmonary edema": "Edema",
             "pleural thickening": "Pleural thickening",
+            "pleural extension": "Pleural thickening",
+            "pleural scarring": "Pleural thickening",
             "calcification": "Calcification",
+            "calcified": "Calcification",
+            "calcified nodule": "Calcification",
+            "aortic enlargement": "Aortic enlargement",
+            "aortic knob": "Aortic enlargement",
+            "dilated aorta": "Aortic enlargement",
+            "prominent aortic knob": "Aortic enlargement",
             "cavity": "Lung cavity",
             "cyst": "Lung cyst",
+            "other lesion": "Other lesion",
+            "bone lesion": "Other lesion",
+            "soft tissue lesion": "Other lesion",
+            "pleural plaque": "Pleural thickening",
+            "lung opacities": "Lung Opacity",
+            "foreign object": "Other lesion",
+            "consolidation": "Consolidation",
+            "pneumonia": "Consolidation",
         }
         
         if name_lower in mappings:
@@ -361,27 +383,63 @@ class VocabularyConstraint:
     
     @classmethod
     def validate_findings(cls, findings: list) -> list:
-        """Validate and normalize a list of findings."""
+        """Validate, normalize, and deduplicate a list of findings."""
         validated = []
-        seen_classes = set()
+        seen_boxes = []
         
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
             
-            class_name = finding.get("class", "")
+            box = finding.get("box", finding.get("b", []))
+            class_name = finding.get("class", finding.get("c", ""))
+            
+            # Normal finding check
+            if class_name.lower() in ["no significant abnormality", "no finding", "healthy", "normal"] or box == [0, 0, 0, 0]:
+                if not validated:
+                    validated.append({"class": "No significant abnormality", "box": [0, 0, 0, 0]})
+                continue
+
             normalized = cls.normalize_class(class_name)
             
-            # Allow multiple findings of same class (e.g. multiple nodules)
-            # if normalized.lower() in seen_classes:
-            #    continue
-            seen_classes.add(normalized.lower())
-            
-            # Keep valid findings
-            if normalized and normalized.lower() != "other lesion":
-                validated.append({
-                    "class": normalized,
-                    "box": finding.get("box", [])
-                })
+            if normalized and len(box) == 4:
+                # Deduplicate identical or near-identical boxes
+                # Convert to ints for robust comparison
+                box_int = [int(float(b)) for b in box]
+                is_duplicate = False
+                for seen in seen_boxes:
+                    if box_int == seen:
+                        is_duplicate = True
+                        break
+                    # Simple IoU check for near-duplicates
+                    try:
+                        # Inline simple IoU for speed
+                        xA = max(box_int[0], seen[0])
+                        yA = max(box_int[1], seen[1])
+                        xB = min(box_int[2], seen[2])
+                        yB = min(box_int[3], seen[3])
+                        inter = max(0, xB - xA) * max(0, yB - yA)
+                        areaA = (box_int[2] - box_int[0]) * (box_int[3] - box_int[1])
+                        areaB = (seen[2] - seen[0]) * (seen[3] - seen[1])
+                        iou = inter / float(areaA + areaB - inter + 1e-6)
+                        if iou > 0.95:
+                            is_duplicate = True
+                            break
+                    except:
+                        continue
+                
+                if not is_duplicate:
+                    # PRESERVE all information and use standard keys
+                    cleaned_finding = finding.copy()
+                    cleaned_finding["class"] = normalized
+                    cleaned_finding["box"] = box_int
+                    # Remove compressed keys if present
+                    cleaned_finding.pop("c", None)
+                    cleaned_finding.pop("b", None)
+                    cleaned_finding.pop("r", None) # Prefer 'reasoning'
+                    if "reasoning" not in cleaned_finding and "r" in finding:
+                        cleaned_finding["reasoning"] = finding["r"]
+                    validated.append(cleaned_finding)
+                    seen_boxes.append(box_int)
         
         return validated

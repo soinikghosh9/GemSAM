@@ -152,6 +152,9 @@ class PreTokenizedDetectionDataset(Dataset):
         self.token_cache: Dict[int, Dict] = {}
         self.image_cache: Dict[int, torch.Tensor] = {}
 
+        # Prompt length cache — skip re-tokenizing identical prompts per modality
+        self._prompt_cache: Dict[str, tuple] = {}  # modality -> (user_ids_list, insert_pos)
+
         # Detection prompts — MUST match inference prompts in medgemma_wrapper.py EXACTLY
         # Now uses modality-aware prompts for multi-modal training
         self.default_modality = "xray"  # Default for datasets without modality info
@@ -314,16 +317,41 @@ class PreTokenizedDetectionDataset(Dataset):
         boxes = sample.get("boxes", [])
         labels = sample.get("labels", [])
 
+        # CLASS-SPECIFIC CLINICAL REASONING (trained radiologist descriptions)
+        CLINICAL_REASONING = {
+            "aortic enlargement": "Prominent aortic knob with unfolding of the thoracic aorta",
+            "atelectasis": "Linear opacity suggesting subsegmental atelectasis with volume loss",
+            "calcification": "Dense calcific focus identified in the specified region",
+            "cardiomegaly": "Enlarged cardiac silhouette with cardiothoracic ratio exceeding 0.5",
+            "clavicle fracture": "Cortical disruption and displaced fracture fragment of the clavicle",
+            "consolidation": "Dense airspace opacity with air bronchograms suggesting consolidation",
+            "edema": "Bilateral perihilar haziness with interstitial markings suggesting pulmonary edema",
+            "emphysema": "Hyperinflated lung fields with flattened hemidiaphragms",
+            "infiltration": "Ill-defined opacity in the lung field suggesting infiltrative process",
+            "ild": "Bilateral reticular markings with ground-glass opacities suggesting interstitial lung disease",
+            "lung opacity": "Focal opacity identified in the lung parenchyma",
+            "nodule/mass": "Well-circumscribed rounded opacity in the lung field",
+            "mass": "Soft tissue density mass lesion identified in the specified region",
+            "nodule": "Small rounded opacity less than 3cm in the lung parenchyma",
+            "pleural effusion": "Blunting of costophrenic angle with meniscus sign suggesting pleural effusion",
+            "pleural thickening": "Thickening of pleural surfaces along the lateral chest wall",
+            "pneumothorax": "Visceral pleural line with absent lung markings indicating pneumothorax",
+            "pulmonary fibrosis": "Bilateral reticular markings with honeycombing pattern at the lung bases",
+            "rib fracture": "Cortical break identified in the rib with step deformity",
+            "other lesion": "Focal abnormality identified requiring further clinical correlation",
+        }
+
         findings = []
         if boxes:
             for box, label in zip(boxes, labels):
-                desc = f"Pathological presence of {label} detected in the specified region, indicating an underlying clinical anomaly requiring attention."
-                reasoning = f"Visual evidence shows {label} in the localized region, consistent with clinical patterns of this pathology."
+                # Get class-specific reasoning or generate generic clinical text
+                label_key = label.lower().strip()
+                reasoning = CLINICAL_REASONING.get(label_key, 
+                    f"Focal abnormality consistent with {label} identified in the specified region")
                 findings.append({
                     "class": label,
-                    "box": [int(b) for b in box],
+                    "box": [int(b) for b in box],  # Coordinates are [x1,y1,x2,y2] from data loader
                     "reasoning": reasoning,
-                    "description": desc
                 })
             target_json = json.dumps({"findings": findings})
         else:
@@ -333,7 +361,7 @@ class PreTokenizedDetectionDataset(Dataset):
                 target_json = json.dumps(normal_findings)
             else:
                 # Legacy fallback - chest X-ray specific
-                target_json = json.dumps({"findings": [{"class": "No significant abnormality", "box": [0,0,0,0], "description": "No acute cardiopulmonary abnormality identified. Heart size and mediastinal contour are within normal limits. Lungs are clear bilaterally without focal consolidation, effusion, or pneumothorax."}]})
+                target_json = json.dumps({"findings": [{"class": "No significant abnormality", "box": [0,0,0,0], "reasoning": "No acute cardiopulmonary abnormality identified. Heart size and mediastinal contour are within normal limits. Lungs are clear bilaterally."}]})
 
         # Build full prompt with chat template
         full_prompt = (
@@ -345,25 +373,34 @@ class PreTokenizedDetectionDataset(Dataset):
         max_len = getattr(self.config, 'max_seq_length', 384)
 
         # Robust tokenization and label masking
-        # The user prompt includes the image token
-        user_prompt = f"<start_of_turn>user\n {detection_prompt}\n<end_of_turn>\n<start_of_turn>model\n"
+        # PROMPT LENGTH CACHING: identical prompts per modality → cache tokenized result
         target_prompt = f"{target_json}<end_of_turn>"
         
-        # Exact tokenization
-        user_ids_list = self.tokenizer.encode(user_prompt, add_special_tokens=True)
-        target_ids_list = self.tokenizer.encode(target_prompt, add_special_tokens=False)
+        if modality in self._prompt_cache:
+            # Cache hit — skip expensive tokenizer.encode for the prompt portion
+            cached_user_ids, insert_pos = self._prompt_cache[modality]
+            user_ids_list = list(cached_user_ids)  # copy to avoid mutation
+        else:
+            # First time for this modality — tokenize and cache
+            user_prompt = f"<start_of_turn>user\n {detection_prompt}\n<end_of_turn>\n<start_of_turn>model\n"
+            user_ids_list = self.tokenizer.encode(user_prompt, add_special_tokens=True)
+            
+            # Find where "user\n" ends to insert image tokens
+            user_turn_ids = self.tokenizer.encode("user\n", add_special_tokens=False)
+            insert_pos = 2  # Fallback
+            for i in range(len(user_ids_list) - len(user_turn_ids) + 1):
+                if user_ids_list[i:i+len(user_turn_ids)] == user_turn_ids:
+                    insert_pos = i + len(user_turn_ids)
+                    break
+            
+            # Inject image tokens into user_ids_list
+            img_tokens = [self.image_token_id] * self.image_seq_length
+            user_ids_list = user_ids_list[:insert_pos] + img_tokens + user_ids_list[insert_pos:]
+            
+            # Cache the tokenized prompt (with image tokens already injected)
+            self._prompt_cache[modality] = (tuple(user_ids_list), insert_pos)
         
-        # Find where "user\n" ends to insert image tokens
-        user_turn_ids = self.tokenizer.encode("user\n", add_special_tokens=False)
-        insert_pos = 2  # Fallback
-        for i in range(len(user_ids_list) - len(user_turn_ids) + 1):
-            if user_ids_list[i:i+len(user_turn_ids)] == user_turn_ids:
-                insert_pos = i + len(user_turn_ids)
-                break
-                
-        # Inject image tokens into user_ids_list
-        img_tokens = [self.image_token_id] * self.image_seq_length
-        user_ids_list = user_ids_list[:insert_pos] + img_tokens + user_ids_list[insert_pos:]
+        target_ids_list = self.tokenizer.encode(target_prompt, add_special_tokens=False)
         
         # Concatenate and truncate
         combined_ids = user_ids_list + target_ids_list
@@ -649,6 +686,16 @@ def preprocess_disk_cache(data_dir: str, cache_dir: str, model_id: str, max_samp
     from transformers import AutoProcessor
 
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+
+    # Workaround for SSL certificate issues in corporate/proxy environments
+    import ssl
+    if not os.environ.get("REQUESTS_CA_BUNDLE"):
+        os.environ["HF_HUB_DISABLE_SSL_VERIFY"] = "1"
+        os.environ["CURL_CA_BUNDLE"] = ""
+        try:
+            ssl._create_default_https_context = ssl._create_unverified_context
+        except AttributeError:
+            pass
 
     # Load processor
     print("\n[1/3] Loading processor...")
@@ -998,6 +1045,16 @@ def main():
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:False"
 
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+
+    # Workaround for SSL certificate issues in corporate/proxy environments
+    import ssl
+    if not os.environ.get("REQUESTS_CA_BUNDLE"):
+        os.environ["HF_HUB_DISABLE_SSL_VERIFY"] = "1"
+        os.environ["CURL_CA_BUNDLE"] = ""
+        try:
+            ssl._create_default_https_context = ssl._create_unverified_context
+        except AttributeError:
+            pass
 
     # Load processor
     processor = AutoProcessor.from_pretrained(

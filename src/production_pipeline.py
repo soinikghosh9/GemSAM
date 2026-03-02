@@ -330,11 +330,8 @@ class ProductionPipeline:
         """Detect specific pathological findings."""
         import torch
 
-        prompt = (
-            f"Analyze this {modality} image for pathological findings. "
-            "For each finding provide: class name, bounding box [x1,y1,x2,y2], severity (mild/moderate/severe), and description. "
-            'Output JSON: {"findings": [{"class": "...", "box": [...], "severity": "...", "description": "..."}]}'
-        )
+        from src.prompts import get_detection_prompt
+        prompt = get_detection_prompt(modality)
 
         inputs = self._processor(
             text=prompt,
@@ -423,13 +420,14 @@ class ProductionPipeline:
             if json_match:
                 data = json.loads(json_match.group(0))
 
-                for f in data.get("findings", []):
+                f_list = data.get("findings", data.get("f", []))
+                for f in f_list:
                     finding = MedicalFinding(
-                        finding_class=f.get("class", "Unknown"),
+                        finding_class=f.get("class", f.get("c", "Unknown")),
                         confidence=f.get("confidence", 0.7),
-                        bounding_box=f.get("box", [0, 0, 100, 100]),
+                        bounding_box=f.get("box", f.get("b", [0, 0, 100, 100])),
                         severity=f.get("severity", "mild"),
-                        description=f.get("description", "")
+                        description=f.get("description", f.get("r", ""))
                     )
                     findings.append(finding)
         except:

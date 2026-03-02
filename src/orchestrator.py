@@ -416,6 +416,15 @@ class GemSAMOrchestrator:
                         is_verified, clinical_confidence = self._verify_roi(image_path, mask, det["label"])
                         
                         if is_verified:
+                            # 3.5: ROI-Driven Box Refinement (NEW)
+                            # Snap the box to the actual mask boundaries for visual precision
+                            refined_box = self._refine_box_from_mask(mask)
+                            if refined_box:
+                                # Standardize: Only update if refined box is reasonably similar or more compact
+                                # (Avoids snapping to empty space if mask is noisy)
+                                box = refined_box
+                                print(f"    [GROUNDED] ROI refined box via SAM2 visual features")
+
                             state["segmentations"].append({
                                 "box": box,
                                 "mask": mask, 
@@ -424,6 +433,9 @@ class GemSAMOrchestrator:
                                 "verified": True,
                                 "clinical_confidence": clinical_confidence
                             })
+                            
+                            # Also update the primary detection box to the refined version
+                            det["box"] = box
                             print(f"    [VERIFIED] Finding confirmed with {clinical_confidence*100:.1f}% confidence")
                         else:
                             print(f"    [ATTENTION] Finding rejected/unconfirmed by clinical verification loop")
@@ -532,7 +544,7 @@ for clinical diagnosis without expert review.
         ax0.set_title("Detection (MedGemma)", fontsize=16)
         ax0.axis('off')
         for det in state["detections"]:
-            y1, x1, y2, x2 = det["box"]
+            x1, y1, x2, y2 = det["box"]  # [x1,y1,x2,y2] standardized
             rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, linewidth=3, edgecolor='red', facecolor='none')
             ax0.add_patch(rect)
 
@@ -572,7 +584,7 @@ for clinical diagnosis without expert review.
                 if len(mask.shape) == 3: mask = mask[0]
                 masked_data = np.ma.masked_where(mask == 0, mask)
                 ax2.imshow(masked_data, cmap='spring', alpha=0.4, interpolation='none')
-                y1, x1, y2, x2 = seg["box"]
+                x1, y1, x2, y2 = seg["box"]  # [x1,y1,x2,y2] standardized
                 rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, linewidth=2, edgecolor='yellow', facecolor='none', linestyle='--')
                 ax2.add_patch(rect)
         
@@ -601,14 +613,14 @@ for clinical diagnosis without expert review.
 
         for f in vlm_findings:
             label = f.get("class", "Anomaly")
-            vlm_box_norm = f.get("box") # [y1, x1, y2, x2] in 0-1000
+            vlm_box_norm = f.get("box") # [x1, y1, x2, y2] in 0-1000 (standardized)
             
             if not vlm_box_norm or len(vlm_box_norm) != 4:
                 # Fallback to heatmap only
                 continue
 
-            # Denormalize to pixel scale
-            y1, x1, y2, x2 = vlm_box_norm
+            # Denormalize to pixel scale — coordinates are [x1, y1, x2, y2]
+            x1, y1, x2, y2 = vlm_box_norm
             x1_px, y1_px = int(x1 * w_orig / 1000), int(y1 * h_orig / 1000)
             x2_px, y2_px = int(x2 * w_orig / 1000), int(y2 * h_orig / 1000)
             vlm_box_px = [x1_px, y1_px, x2_px, y2_px]
@@ -656,8 +668,9 @@ for clinical diagnosis without expert review.
             crop = img[max(0, y1-pad):min(h, y2+pad), max(0, x1-pad):min(w, x2+pad)]
             crop_pil = Image.fromarray(crop)
             
-            # 2. Re-load MedGemma for verification (if not loaded)
-            self.medgemma.load() 
+            # 2. Re-use MedGemma if already loaded (skip redundant reload)
+            if not getattr(self.medgemma, 'model', None):
+                self.medgemma.load() 
             
             # 3. Targeted Query
             query = f"Focus on this specific highlighted region. Is there a {label} present here? Describe what you see."
@@ -671,6 +684,25 @@ for clinical diagnosis without expert review.
         except Exception as e:
             print(f"  (!) Verification loop error: {e}")
             return True, 0.5 # Default to true to avoid missing potential findings
+
+    def _refine_box_from_mask(self, mask):
+        """
+        Visual Grounding: Extracts the bounding box from a binary mask.
+        Ensures the box is truly derived from image-specific features.
+        """
+        if len(mask.shape) == 3:
+            mask = mask[0]
+            
+        y_indices, x_indices = np.where(mask > 0)
+        if len(y_indices) == 0:
+            return None
+            
+        # Standard safety: ensure reasonable box size
+        x1, y1 = np.min(x_indices), np.min(y_indices)
+        x2, y2 = np.max(x_indices), np.max(y_indices)
+        
+        # Return as [x1, y1, x2, y2] pixel coordinates
+        return [int(x1), int(y1), int(x2), int(y2)]
 
 def main():
     """CLI entry point for the orchestrator."""

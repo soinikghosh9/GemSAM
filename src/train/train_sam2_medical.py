@@ -43,8 +43,8 @@ class EarlyStoppingConfig:
     enabled: bool = True
     patience: int = 5  # Number of evaluation windows without improvement
     min_delta: float = 0.005  # Minimum improvement to count as progress
-    loss_threshold: float = 0.1  # Stop if loss goes below this
-    dice_threshold: float = 0.9  # Stop if dice goes above this
+    loss_threshold: float = 0.02  # Stop if loss goes below this (very converged)
+    dice_threshold: float = 0.95  # Stop if dice goes above this
     eval_interval: int = 50  # Evaluate every N batches
 
 
@@ -53,7 +53,7 @@ class SAM2TrainingConfig:
     """Configuration for SAM2 medical training."""
     # Data
     data_dir: str = "medical_data"
-    dataset: str = "slake"  # slake, brats, or custom
+    dataset: str = "all"  # all (loads every available dataset), busi, or slake
     image_size: int = 1024  # SAM2 REQUIRES 1024 - architecture constraint (64x64 feature maps)
 
     # Model
@@ -83,7 +83,7 @@ class SAM2TrainingConfig:
     val_every_n_epochs: int = 1
 
     # Output
-    output_dir: str = "outputs/sam2_medical"
+    output_dir: str = "checkpoints/production/sam2"
     save_every_n_epochs: int = 1
 
     # Debug
@@ -95,30 +95,112 @@ class SAM2TrainingConfig:
 
 class MedicalSegmentationDataset(Dataset):
     """
-    Medical image segmentation dataset supporting SLAKE format.
+    Medical image segmentation dataset supporting BUSI and SLAKE formats.
 
-    Expected structure:
+    BUSI format (primary):
+    - benign/<name>.png + <name>_mask.png
+    - malignant/<name>.png + <name>_mask.png
+    - normal/ (excluded - no lesions)
+
+    SLAKE format:
     - imgs/case_id/source.jpg (or .png)
     - imgs/case_id/mask.png
     """
 
-    def __init__(self, data_dir: str, split: str = "train", image_size: int = 1024):
+    def __init__(self, data_dir: str, split: str = "train", image_size: int = 1024,
+                 dataset: str = "all"):
         self.data_dir = data_dir
         self.split = split
         self.image_size = image_size
         self.samples = []
 
-        # Find SLAKE dataset
+        # Load ALL available segmentation datasets for maximum training data
+        load_busi = dataset in ("all", "busi")
+        load_slake = dataset in ("all", "slake")
+
+        if load_busi:
+            busi_dirs = [
+                os.path.join(data_dir, "Dataset_BUSI_with_GT"),
+                os.path.join(data_dir, "BUSI"),
+                os.path.join(data_dir, "busi"),
+            ]
+            for d in busi_dirs:
+                if os.path.exists(d):
+                    self._load_busi(d)
+                    break
+            else:
+                if dataset == "busi":
+                    print(f"[WARN] BUSI directory not found in {data_dir}")
+
+        if load_slake:
+            self._try_load_slake(data_dir)
+
+        if len(self.samples) == 0:
+            print(f"[WARN] No segmentation samples found in {data_dir}")
+
+        print(f"[SAM2 Dataset] Loaded {len(self.samples)} samples for {split} (dataset={dataset})")
+
+    def _load_busi(self, busi_dir: str):
+        """Load BUSI breast ultrasound dataset with ground truth masks."""
+        # Only load benign and malignant (normal has no lesions to segment)
+        for category in ["benign", "malignant"]:
+            cat_dir = os.path.join(busi_dir, category)
+            if not os.path.exists(cat_dir):
+                continue
+
+            # Find all image files (not masks)
+            for fname in os.listdir(cat_dir):
+                if not fname.endswith(".png"):
+                    continue
+                if "_mask" in fname:
+                    continue  # Skip mask files
+
+                image_path = os.path.join(cat_dir, fname)
+                base_name = fname.replace(".png", "")
+
+                # Find primary mask
+                mask_path = os.path.join(cat_dir, f"{base_name}_mask.png")
+                if not os.path.exists(mask_path):
+                    continue
+
+                # Check for additional masks (_mask_1.png, _mask_2.png)
+                extra_masks = []
+                for i in range(1, 5):
+                    extra = os.path.join(cat_dir, f"{base_name}_mask_{i}.png")
+                    if os.path.exists(extra):
+                        extra_masks.append(extra)
+
+                # Verify mask has content
+                try:
+                    mask = Image.open(mask_path).convert("L")
+                    mask_arr = np.array(mask)
+                    if mask_arr.max() > 0:
+                        self.samples.append({
+                            "image": image_path,
+                            "mask": mask_path,
+                            "extra_masks": extra_masks,
+                            "case_id": f"{category}/{base_name}",
+                            "category": category
+                        })
+                except Exception:
+                    pass
+
+        busi_count = len(self.samples)
+        print(f"  BUSI: {busi_count} samples "
+              f"(benign + malignant with valid masks)")
+
+    def _try_load_slake(self, data_dir: str):
+        """Try to load SLAKE dataset for segmentation."""
         slake_dir = os.path.join(data_dir, "Slake1.0", "imgs")
         if not os.path.exists(slake_dir):
             slake_dir = os.path.join(data_dir, "slake", "imgs")
-
         if os.path.exists(slake_dir):
+            before = len(self.samples)
             self._load_slake(slake_dir)
+            slake_count = len(self.samples) - before
+            print(f"  SLAKE: {slake_count} samples (with valid segmentation masks)")
         else:
-            print(f"[WARN] SLAKE directory not found at {slake_dir}")
-
-        print(f"[SAM2 Dataset] Loaded {len(self.samples)} samples for {split}")
+            print(f"  SLAKE: not found in {data_dir}")
 
     def _load_slake(self, imgs_dir: str):
         """Load SLAKE dataset with masks."""
@@ -147,7 +229,9 @@ class MedicalSegmentationDataset(Dataset):
                         self.samples.append({
                             "image": source_path,
                             "mask": mask_path,
-                            "case_id": case_id
+                            "extra_masks": [],
+                            "case_id": case_id,
+                            "category": "slake"
                         })
                 except Exception as e:
                     pass  # Skip invalid masks
@@ -169,10 +253,21 @@ class MedicalSegmentationDataset(Dataset):
         std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
         image_tensor = (image_tensor - mean) / std
 
-        # Load mask
+        # Load mask (combine multiple masks if present)
         mask = Image.open(sample["mask"]).convert("L")
         mask = mask.resize((self.image_size, self.image_size), resample=Image.NEAREST)
         mask_array = np.array(mask).astype(np.float32)
+
+        # Combine extra masks (BUSI may have _mask_1.png, _mask_2.png)
+        for extra_path in sample.get("extra_masks", []):
+            try:
+                extra = Image.open(extra_path).convert("L")
+                extra = extra.resize((self.image_size, self.image_size), resample=Image.NEAREST)
+                extra_arr = np.array(extra).astype(np.float32)
+                mask_array = np.maximum(mask_array, extra_arr)  # Union of masks
+            except Exception:
+                pass
+
         mask_array = (mask_array > 0).astype(np.float32)  # Binary mask
         mask_tensor = torch.from_numpy(mask_array).unsqueeze(0)  # [1, H, W]
 
@@ -671,7 +766,8 @@ class SAM2MedicalTrainer:
         dataset = MedicalSegmentationDataset(
             data_dir=self.config.data_dir,
             split="train",
-            image_size=self.config.image_size
+            image_size=self.config.image_size,
+            dataset=self.config.dataset
         )
 
         if len(dataset) == 0:
@@ -748,21 +844,15 @@ class SAM2MedicalTrainer:
         # Early stopping configuration
         es_config = self.config.early_stopping
         if es_config.enabled:
-            print(f"  Early Stopping: enabled (patience={es_config.patience}, "
+            print(f"  Early Stopping: enabled (patience={es_config.patience} epochs, "
                   f"loss_threshold={es_config.loss_threshold}, dice_threshold={es_config.dice_threshold})")
         else:
             print("  Early Stopping: disabled")
 
-        # Early stopping state
-        best_loss = float('inf')
-        best_dice = 0.0
+        # Early stopping state (EPOCH-LEVEL, not batch-level)
+        best_val_dice = 0.0
         patience_counter = 0
         early_stop_triggered = False
-        window_loss_sum = 0.0
-        window_dice_sum = 0.0
-        window_steps = 0
-        global_batch_idx = 0
-        first_loss_check_done = False  # For immediate convergence check
 
         for epoch in range(self.config.epochs):
             if early_stop_triggered:
@@ -782,12 +872,6 @@ class SAM2MedicalTrainer:
                     epoch_loss += loss
                     epoch_dice += metrics["dice_score"]
                     epoch_steps += 1
-
-                    # Track for early stopping window
-                    window_loss_sum += loss
-                    window_dice_sum += metrics["dice_score"]
-                    window_steps += 1
-                    global_batch_idx += 1
 
                     # Gradient accumulation step
                     if (batch_idx + 1) % self.config.gradient_accumulation_steps == 0:
@@ -824,59 +908,16 @@ class SAM2MedicalTrainer:
                         "lr": f"{self.scheduler.get_last_lr()[0]:.2e}"
                     })
 
-                    # Early stopping check
-                    if es_config.enabled:
-                        # Immediate convergence check after first 10 batches
-                        if not first_loss_check_done and global_batch_idx >= 10:
-                            first_loss_check_done = True
-                            current_loss = epoch_loss / max(epoch_steps, 1)
-                            current_dice = epoch_dice / max(epoch_steps, 1)
-                            if current_loss < es_config.loss_threshold:
-                                print(f"\n  [EARLY STOP] Initial loss {current_loss:.6f} already below threshold")
-                                early_stop_triggered = True
-                                break
-                            if current_dice > es_config.dice_threshold:
-                                print(f"\n  [EARLY STOP] Initial dice {current_dice:.4f} already above threshold")
-                                early_stop_triggered = True
-                                break
-
-                        # Regular interval check
-                        if global_batch_idx % es_config.eval_interval == 0 and window_steps > 0:
-                            window_avg_loss = window_loss_sum / window_steps
-                            window_avg_dice = window_dice_sum / window_steps
-
-                            # Check absolute thresholds (model has converged)
-                            if window_avg_loss < es_config.loss_threshold:
-                                print(f"\n  [EARLY STOP] Loss {window_avg_loss:.6f} < threshold {es_config.loss_threshold}")
-                                early_stop_triggered = True
-                                break
-
-                            if window_avg_dice > es_config.dice_threshold:
-                                print(f"\n  [EARLY STOP] Dice {window_avg_dice:.4f} > threshold {es_config.dice_threshold}")
-                                early_stop_triggered = True
-                                break
-
-                            # Check for improvement (using loss as primary metric)
-                            improvement = best_loss - window_avg_loss
-                            if improvement > es_config.min_delta:
-                                best_loss = window_avg_loss
-                                best_dice = max(best_dice, window_avg_dice)
-                                patience_counter = 0
-                                print(f"\n  [ES] New best: loss={best_loss:.6f}, dice={best_dice:.4f}")
-                            else:
-                                patience_counter += 1
-                                if patience_counter % 2 == 0:  # Log every other check
-                                    print(f"\n  [ES] No improvement. Patience: {patience_counter}/{es_config.patience}")
-
-                                if patience_counter >= es_config.patience:
-                                    print(f"\n  [EARLY STOP] No improvement for {es_config.patience} evaluations")
-                                    early_stop_triggered = True
-                                    break
-
-                            # Reset window
-                            window_loss_sum = 0.0
-                            window_dice_sum = 0.0
-                            window_steps = 0
+                    # Safety-net threshold check (rare, only for already-converged models)
+                    if es_config.enabled and epoch_steps % 200 == 0:
+                        if avg_loss < es_config.loss_threshold:
+                            print(f"\n  [CONVERGED] Avg loss {avg_loss:.6f} < threshold {es_config.loss_threshold}")
+                            early_stop_triggered = True
+                            break
+                        if avg_dice > es_config.dice_threshold:
+                            print(f"\n  [CONVERGED] Avg dice {avg_dice:.4f} > threshold {es_config.dice_threshold}")
+                            early_stop_triggered = True
+                            break
 
                 except Exception as e:
                     print(f"\n  Error in batch {batch_idx}: {e}")
@@ -904,6 +945,20 @@ class SAM2MedicalTrainer:
                 if val_metrics["val_dice"] > self.best_val_dice:
                     self.best_val_dice = val_metrics["val_dice"]
                     self._save_checkpoint("best")
+
+                # EPOCH-LEVEL early stopping based on validation Dice
+                if es_config.enabled and not early_stop_triggered:
+                    if val_metrics["val_dice"] > best_val_dice + es_config.min_delta:
+                        best_val_dice = val_metrics["val_dice"]
+                        patience_counter = 0
+                        print(f"  [ES] New best val Dice: {best_val_dice:.4f}")
+                    else:
+                        patience_counter += 1
+                        print(f"  [ES] No val Dice improvement. Patience: {patience_counter}/{es_config.patience}")
+
+                        if patience_counter >= es_config.patience:
+                            print(f"  [EARLY STOP] Val Dice not improving for {es_config.patience} epochs")
+                            early_stop_triggered = True
 
             # Log epoch
             self.training_log.append({
@@ -936,7 +991,6 @@ class SAM2MedicalTrainer:
         print("TRAINING COMPLETE")
         if early_stop_triggered:
             print(f"Early stopping triggered at epoch {epoch + 1}")
-            print(f"Best training loss: {best_loss:.6f}, Best dice: {best_dice:.4f}")
         print(f"Best validation Dice: {self.best_val_dice:.4f}")
         print(f"Output: {self.config.output_dir}")
         print(f"{'='*60}")
@@ -966,9 +1020,10 @@ class SAM2MedicalTrainer:
 def main():
     parser = argparse.ArgumentParser(description="SAM2 Medical Segmentation Training")
     parser.add_argument("--data-dir", default="medical_data", help="Data directory")
-    parser.add_argument("--output-dir", default="outputs/sam2_medical", help="Output directory")
+    parser.add_argument("--output-dir", default="checkpoints/production/sam2", help="Output directory")
+    parser.add_argument("--dataset", default="all", choices=["all", "busi", "slake"], help="Dataset to use (all=load every available)")
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
-    parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size (1 for 16GB VRAM)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--max-samples", type=int, default=-1, help="Limit samples (-1 for all)")
     parser.add_argument("--quick", action="store_true", help="Quick run with 100 samples, 1 epoch")
@@ -978,6 +1033,7 @@ def main():
     # Create config
     config = SAM2TrainingConfig(
         data_dir=args.data_dir,
+        dataset=args.dataset,
         output_dir=args.output_dir,
         epochs=args.epochs if not args.quick else 1,
         batch_size=args.batch_size,

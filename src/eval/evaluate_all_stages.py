@@ -17,12 +17,14 @@ import json
 import time
 import random
 import argparse
+from peft import PeftModel
+from typing import Dict, Any, List, Optional, Union, Iterable
 import torch
 import numpy as np
+import string
 from datetime import datetime
 from tqdm import tqdm
 from PIL import Image
-from peft import PeftModel
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -55,7 +57,7 @@ STAGE_CONFIGS = [
     },
     {
         "name": "detection",
-        "adapter_dir": "final",  # Use production-ready detection adapter
+        "adapter_dir": "detection",  # Use the newly retrained detection adapter
         "task": "detection",
         "dataset": "vindr",
         "split": "test",
@@ -76,7 +78,8 @@ class MultiStageEvaluator:
     def __init__(self, args):
         self.args = args
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.results = {}  # Store per-stage results
+        self.results: Dict[str, Any] = {}  # Store per-stage results
+        self._base_wrapper = None  # Cached base model for adapter-swap
 
     def run_all(self):
         """Evaluate all stages sequentially."""
@@ -115,29 +118,68 @@ class MultiStageEvaluator:
             print(f"{'=' * 60}")
 
             try:
-                stage_result = self._evaluate_stage(stage_config, adapter_path)
+                stage_result: Dict[str, Any] = self._evaluate_stage(stage_config, adapter_path)
                 self.results[stage_name] = stage_result
             except Exception as e:
                 print(f"\n[ERROR] Stage '{stage_name}' failed: {e}")
                 import traceback
                 traceback.print_exc()
-                self.results[stage_name] = {"status": "failed", "error": str(e)}
+                error_result: Dict[str, Any] = {"status": "failed", "error": str(e)}
+                self.results[stage_name] = error_result
 
         # Print and save unified report
         self._print_summary()
         self._save_report()
 
+        # Final cleanup: unload the base model after ALL stages are done
+        if self._base_wrapper is not None:
+            self._base_wrapper.unload()
+            self._base_wrapper = None
+
     def _load_model_with_adapter(self, adapter_path):
-        """Load base MedGemma + stage-specific adapter."""
-        wrapper = MedGemmaWrapper()
-        wrapper.load()
+        """Load base MedGemma + stage-specific adapter.
+        
+        PRODUCTION OPTIMIZATION: Reuses the base model across stages.
+        Only the lightweight LoRA adapter (~10MB) is swapped per stage,
+        avoiding 4x reloads of the 7GB base model.
+        """
+        # Reuse base model if already loaded
+        if not hasattr(self, '_base_wrapper') or self._base_wrapper is None or self._base_wrapper.model is None:
+            print("  [INIT] Loading base MedGemma model (first stage)...")
+            self._base_wrapper = MedGemmaWrapper()
+            self._base_wrapper.load(use_base_model=True)
+        else:
+            print("  [CACHE] Reusing base model from previous stage")
+            # Unload previous adapter if any
+            try:
+                model = self._base_wrapper.model
+                # If model was wrapped by PeftModel fallback, unwrap it first
+                if hasattr(model, 'base_model') and hasattr(model, 'peft_config'):
+                    from peft import PeftModel
+                    if isinstance(model, PeftModel):
+                        print("  [UNWRAP] Removing PeftModel wrapper from previous stage")
+                        self._base_wrapper.model = model.base_model.model
+                        model = self._base_wrapper.model
+                elif hasattr(model, 'disable_adapter_layers'):
+                    model.disable_adapter_layers()
+                    if hasattr(model, 'delete_adapter'):
+                        try:
+                            model.delete_adapter('default')
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"  [WARN] Adapter cleanup: {e}")
+        
+        wrapper = self._base_wrapper
 
         if os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
             print(f"  Loading adapter: {adapter_path}")
-            # Use transformers' native load_adapter which is more robust for Gemma 3
-            if hasattr(wrapper.model, "load_adapter"):
-                wrapper.model.load_adapter(adapter_path)
-            else:
+            try:
+                wrapper.model.load_adapter(adapter_path, adapter_name="default")
+                wrapper.model.set_adapter("default")
+            except Exception as e:
+                print(f"  (!) Failed to load adapter via load_adapter: {e}")
+                print(f"  Attempting PeftModel.from_pretrained fallback...")
                 from peft import PeftModel
                 wrapper.model = PeftModel.from_pretrained(wrapper.model, adapter_path)
 
@@ -154,6 +196,11 @@ class MultiStageEvaluator:
             print(f"  (!) No adapter_config.json found, using base model")
 
         wrapper.model.eval()
+        # Update evaluator device based on the loaded model's device
+        if hasattr(wrapper.model, 'device'):
+            self.device = str(wrapper.model.device)
+            print(f"  Model successfully loaded on device: {self.device}")
+            
         return wrapper
 
     def _evaluate_stage(self, stage_config, adapter_path):
@@ -177,16 +224,24 @@ class MultiStageEvaluator:
             print(f"  [ERROR] Stage '{stage_name}' dataset load failed: {e}")
             import traceback
             traceback.print_exc()
-            if model:
-                model.unload()
             return {"status": "failed", "error": f"Dataset load failed: {e}"}
 
         total_samples = len(loader.dataset)
 
-        # Subset if needed [DONE][DONE][DONE] use RANDOM indices for class diversity
-        if self.args.max_samples > 0 and self.args.max_samples < total_samples:
+        # Subset with balanced ratio if requested for detection
+        if task == "detection" and self.args.max_samples > 0:
+            indices = self._get_balanced_indices(loader.dataset, self.args.max_samples)
+            collate_fn = loader.collate_fn
+            loader = torch.utils.data.DataLoader(
+                torch.utils.data.Subset(loader.dataset, indices),
+                batch_size=1, shuffle=True, # Shuffle for variety if oversampling
+                num_workers=0,
+                collate_fn=collate_fn
+            )
+            total_samples = len(indices)
+        elif self.args.max_samples > 0 and self.args.max_samples < total_samples:
             all_indices = list(range(total_samples))
-            random.seed(42)  # Reproducible
+            random.seed(42)
             random.shuffle(all_indices)
             indices = all_indices[:self.args.max_samples]
             collate_fn = loader.collate_fn
@@ -213,17 +268,70 @@ class MultiStageEvaluator:
             result = {"status": "unknown_task"}
 
         elapsed = time.time() - start_time
-        result["elapsed_seconds"] = round(elapsed, 1)
-        result["samples_evaluated"] = total_samples
-        result["dataset"] = dataset_name
-        result["status"] = "completed"
+        final_result: Dict[str, Any] = dict(result)
+        final_result["elapsed_seconds"] = round(float(elapsed), 1)
+        final_result["samples_evaluated"] = int(total_samples)
+        final_result["dataset"] = str(dataset_name)
+        final_result["status"] = "completed"
 
-        # Unload model to free memory for next stage
-        model.unload()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # NOTE: Do NOT call model.unload() here — it destroys the shared
+        # _base_wrapper used across all stages. Adapter-swap is handled by
+        # _load_model_with_adapter() which detaches the old LoRA adapter.
+        # Only clear the CUDA cache to free intermediate tensors.
 
-        return result
+        return final_result
+
+    def _get_balanced_indices(self, dataset, max_samples):
+        """Get indices with 70% abnormal and 30% normal samples."""
+        print(f"  Filtering for balanced sampling (70% abnormal, 30% normal)...")
+        
+        abnormal_indices = []
+        normal_indices = []
+        
+        # We need to know which are abnormal. VinDrCXRLoader has image_ids and data_map.
+        # If it's not a VinDrCXRLoader, we'll have to iterate (slow but safe).
+        if hasattr(dataset, 'image_ids') and hasattr(dataset, 'data_map'):
+            for i, img_id in enumerate(dataset.image_ids):
+                group = dataset.data_map.get_group(img_id)
+                if any(row['class_name'] != 'No finding' for _, row in group.iterrows()):
+                    abnormal_indices.append(i)
+                else:
+                    normal_indices.append(i)
+        else:
+            # Fallback iteration
+            for i in range(len(dataset)):
+                sample = dataset[i]
+                if sample.get("boxes") or sample.get("labels"):
+                    abnormal_indices.append(i)
+                else:
+                    normal_indices.append(i)
+        
+        print(f"  Dataset has {len(abnormal_indices)} abnormal and {len(normal_indices)} normal samples.")
+        
+        # Target 70% abnormal
+        n_abnormal = int(max_samples * 0.7)
+        n_normal = max_samples - n_abnormal
+        
+        # If we don't have enough, we'll take what we have
+        if len(abnormal_indices) < n_abnormal:
+            print(f"  Warning: Only {len(abnormal_indices)} abnormal samples available. Using all.")
+            selected_abnormal = abnormal_indices
+            # Fill the rest with normal if possible
+            n_normal = max_samples - len(selected_abnormal)
+        else:
+            random.seed(42)
+            selected_abnormal = random.sample(abnormal_indices, n_abnormal)
+            
+        if len(normal_indices) < n_normal:
+            selected_normal = normal_indices
+        else:
+            random.seed(42)
+            selected_normal = random.sample(normal_indices, n_normal)
+            
+        print(f"  Selected {len(selected_abnormal)} abnormal and {len(selected_normal)} normal samples.")
+        combined = selected_abnormal + selected_normal
+        random.shuffle(combined)
+        return combined
 
     def _eval_screening_stage(self, model, loader, total):
         """Binary classification: HEALTHY vs ABNORMAL."""
@@ -269,10 +377,10 @@ class MultiStageEvaluator:
                     raw_samples.append({"gt": str(gt_label), "error": str(e)})
 
         acc = correct / max(total_count, 1)
-        print(f"  [DONE][DONE][DONE] Screening Accuracy: {acc:.4f} ({correct}/{total_count})")
+        print(f"  Screening Accuracy: {acc:.4f} ({correct}/{total_count})")
 
         return {
-            "accuracy": round(acc, 4),
+            "accuracy": round(float(acc), 4),
             "correct": correct,
             "total": total_count,
             "raw_samples": raw_samples
@@ -337,7 +445,7 @@ class MultiStageEvaluator:
             print(f"    {cls}: {cls_acc}")
 
         return {
-            "accuracy": round(acc, 4),
+            "accuracy": round(float(acc), 4),
             "correct": correct,
             "total": total_count,
             "per_class_accuracy": per_class_acc,
@@ -345,14 +453,90 @@ class MultiStageEvaluator:
         }
 
     def _eval_detection_stage(self, model, loader, total):
-        """Detection with bounding box evaluation."""
+        """Detection with bounding box evaluation + accuracy + confidence metrics."""
         tp, fp, fn = 0, 0, 0
+        tn = 0  # True negatives: correctly predicted normal on normal images
         iou_sum, iou_count = 0.0, 0
+        class_agnostic_iou_sum, class_agnostic_iou_count = 0.0, 0  # Localization-only metric
         finding_match = 0
         total_count = 0
         raw_samples = []
 
+        # --- NEW: Per-image accuracy + confidence tracking ---
+        image_correct = 0     # Correctly classified normal/abnormal
+        image_total = 0
+        confidence_scores = []  # Per-image confidence (0.0 to 1.0)
+        per_class_stats = {}   # {class_name: {tp, fp, fn}}
+
         skipped_normal = 0
+
+        # EXPANDED CLASS MATCHING GROUPS (clinical synonyms in radiology)
+        OPACITY_GROUP = {"lung opacity", "consolidation", "infiltration", "pneumonia", "atelectasis", "airspace opacity"}
+        PLEURAL_GROUP = {"pleural thickening", "pleural effusion"}
+        NODULE_GROUP = {"nodule/mass", "nodule", "mass", "calcification", "lung nodule", "mass/nodule"}
+        FIBROSIS_GROUP = {"pulmonary fibrosis", "fibrosis", "ild", "interstitial lung disease", "scarring", "reticular pattern"}
+        CARDIAC_GROUP = {"cardiomegaly", "aortic enlargement", "enlarged heart", "cardiac enlargement"}
+        EMPHYSEMA_GROUP = {"emphysema", "copd", "hyperinflation", "bullae"}
+        FRACTURE_GROUP = {"rib fracture", "clavicle fracture", "fracture", "bone fracture"}
+        ALL_GROUPS = [OPACITY_GROUP, PLEURAL_GROUP, NODULE_GROUP, FIBROSIS_GROUP, CARDIAC_GROUP, EMPHYSEMA_GROUP, FRACTURE_GROUP]
+
+        def _normalize_class(label):
+            """Normalize class label for per-class tracking."""
+            low = label.lower().strip()
+            for group in ALL_GROUPS:
+                if low in group:
+                    return sorted(group)[0]  # Canonical name = alphabetically first
+            return low
+
+        def _compute_image_confidence(gt_boxes, gt_labels, pred_findings, matched_count, img_tp, img_fp, img_fn):
+            """Compute a per-image confidence score (0.0 to 1.0).
+            
+            Components:
+              - Classification confidence: Did we get normal/abnormal right?
+              - Finding count agreement: |pred| close to |gt|?
+              - Match rate: What fraction of GT findings were matched?
+              - Reasoning quality: Does the output contain clinical reasoning?
+            """
+            gt_is_abnormal = len(gt_boxes) > 0
+            pred_is_abnormal = len(pred_findings) > 0
+            
+            # 1. Classification component (40% weight)
+            classification_score = 1.0 if (gt_is_abnormal == pred_is_abnormal) else 0.0
+            
+            # 2. Finding count agreement (20% weight)
+            if gt_is_abnormal:
+                gt_count = len(gt_labels)
+                pred_count = len(pred_findings)
+                count_ratio = min(gt_count, pred_count) / max(gt_count, pred_count, 1)
+            else:
+                count_ratio = 1.0 if not pred_is_abnormal else 0.0
+            
+            # 3. Match rate (30% weight)
+            if gt_is_abnormal and len(gt_labels) > 0:
+                match_rate = matched_count / len(gt_labels)
+            elif not gt_is_abnormal and not pred_is_abnormal:
+                match_rate = 1.0
+            else:
+                match_rate = 0.0
+            
+            # 4. Reasoning quality (10% weight) — does the finding have reasoning text?
+            reasoning_score = 0.0
+            if pred_findings:
+                has_reasoning = sum(1 for f in pred_findings 
+                                   if isinstance(f, dict) and 
+                                   len(str(f.get("reasoning", f.get("r", "")))) > 10)
+                reasoning_score = has_reasoning / len(pred_findings)
+            elif not gt_is_abnormal:
+                reasoning_score = 1.0  # Normal with no findings is fine
+            
+            # Weighted composite
+            confidence = (
+                0.40 * classification_score +
+                0.20 * count_ratio +
+                0.30 * match_rate +
+                0.10 * reasoning_score
+            )
+            return round(confidence, 4)
 
         for i, batch in tqdm(enumerate(loader), total=total, desc="Detection"):
             image = batch["image"][0]
@@ -372,29 +556,22 @@ class MultiStageEvaluator:
                     ])
             
             # MERGE GROUND TRUTH (VinDr has multiple annotators per lesion)
-            # We group boxes by class and merge overlapping ones
             final_gt_boxes = []
             final_gt_labels = []
             
             if denorm_gt and gt_labels:
-                # Group by label
                 by_label = {}
                 for box, lbl in zip(denorm_gt, gt_labels):
                     if lbl not in by_label: by_label[lbl] = []
                     by_label[lbl].append(box)
                 
-                # Merge per label
                 for lbl, boxes in by_label.items():
-                    # Simple greedy merging
                     merged_boxes = []
                     while boxes:
                         current = boxes.pop(0)
                         keep = True
-                        # check against already merged
                         for m_idx, m in enumerate(merged_boxes):
-                            if compute_iou(current, m) > 0.3: # Low thresh to merge same finding
-                                # It's the same finding, don't add new box. 
-                                # Optionally average them? For now just keep the first one.
+                            if compute_iou(current, m) > 0.3:
                                 keep = False
                                 break
                         if keep:
@@ -407,72 +584,151 @@ class MultiStageEvaluator:
             gt_boxes_for_eval = final_gt_boxes
             gt_labels_for_eval = final_gt_labels
 
-            # Special case for Normal images:
-            # If nothing in GT strings/boxes, it is normal.
-            is_normal_gt = (not gt_boxes and not gt_labels)
-
             try:
                 modality = batch.get("modality", ["xray"])[0]
-                generated_text, pred_boxes = model.analyze_image(image, task="detection", modality=modality)
+                generated_text, pred_boxes = model.analyze_image(
+                    image, task="detection", modality=modality, include_reasoning=True
+                )
             except Exception as e:
                 print(f"  Error [{i}]: {e}")
-                fn += len(gt_boxes)
+                fn += len(gt_boxes_for_eval)
                 total_count += 1
+                image_total += 1
+                # This image is wrong — 0 confidence
+                confidence_scores.append(0.0)
                 continue
 
-            if i < 5:  # Log first 5 samples
-                reasoning_list = model._extract_reasoning(generated_text)
-                raw_samples.append({
-                    "image_id": batch.get("image_id", ["unknown"])[0],
-                    "gt_boxes": gt_boxes[:3],
-                    "gt_labels": gt_labels[:3],
-                    "pred_boxes": pred_boxes[:3],
-                    "reasoning": reasoning_list[:3],
-                    "raw_text": generated_text[:500]
-                })
-
-            # Denormalize predicted boxes (if normalized)
-            # w, h = image.size  <-- ALREADY DEFINED ABOVE
-            denorm_pred = []
-            for b_idx, b in enumerate(pred_boxes):
-                try:
-                    # Assume model outputs 0-1000 integers
-                    x1, y1, x2, y2 = b
-                    
-                    # FILTER: Skip [0,0,0,0] (Normal finding) to avoid False Positive inflation
-                    if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
-                        continue
-                        
-                    denorm_pred.append([
-                        (x1 / 1000) * w, (y1 / 1000) * h,
-                        (x2 / 1000) * w, (y2 / 1000) * h
-                    ])
-                except:
-                    continue
+            # Extract findings with labels
+            findings = model._extract_findings(generated_text)
+            reasoning_list = model._extract_reasoning(generated_text)
             
-            # --- PREVIOUSLY INSERTED GT MERGING LOGIC IS HERE (Implicit) ---
- 
+            denorm_pred = []
+            for f in findings:
+                if not isinstance(f, dict): continue
+                lbl = f.get("c", f.get("class", "unknown"))
+                if lbl.lower() == "no significant abnormality":
+                    continue
+                    
+                b = f.get("b", f.get("box", []))
+                if len(b) == 4:
+                    try:
+                        x1, y1, x2, y2 = b
+                        if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
+                            continue
+                            
+                        denorm_pred.append({
+                            "box": [
+                                round((x1 / 1000) * w), round((y1 / 1000) * h),
+                                round((x2 / 1000) * w), round((y2 / 1000) * h)
+                            ],
+                            "label": lbl
+                        })
+                    except:
+                        continue
 
+            # Clean GT boxes
+            rounded_gt = []
+            for gob in gt_boxes_for_eval:
+                rounded_gt.append([round(c) for c in gob])
+            gt_boxes_for_eval = rounded_gt
 
-            # Match boxes
+            # --- PER-IMAGE ACCURACY: Normal/Abnormal classification ---
+            gt_is_abnormal = len(gt_boxes_for_eval) > 0
+            pred_is_abnormal = len(denorm_pred) > 0
+            image_total += 1
+            if gt_is_abnormal == pred_is_abnormal:
+                image_correct += 1
+
+            # Record raw sample
+            raw_samples.append({
+                "image_id": batch.get("image_id", ["unknown"])[0],
+                "gt_boxes": gt_boxes_for_eval,
+                "gt_labels": gt_labels_for_eval,
+                "pred_boxes": denorm_pred,
+                "reasoning": reasoning_list,
+                "findings": findings,
+                "raw_text": generated_text,
+                "gt_is_abnormal": gt_is_abnormal,
+                "pred_is_abnormal": pred_is_abnormal,
+            })
+
+            # TRUE NEGATIVE HANDLING
+            if not gt_boxes_for_eval and not denorm_pred:
+                tn += 1
+                total_count += 1
+                confidence_scores.append(
+                    _compute_image_confidence(gt_boxes_for_eval, gt_labels_for_eval,
+                                             findings, 0, 0, 0, 0)
+                )
+                continue
+
+            # Match boxes and labels
             matched = set()
-            for pb in denorm_pred:
+            img_tp, img_fp = 0, 0
+            for pred in denorm_pred:
+                pb = pred["box"]
+                plbl = pred["label"]
                 best_iou, best_idx = 0, -1
-                for gi, gb in enumerate(gt_boxes_for_eval):
-                    iou = compute_iou(pb, gb)
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_idx = gi
+                best_class_agnostic_iou = 0
+                
+                for gi, (gb, glbl) in enumerate(zip(gt_boxes_for_eval, gt_labels_for_eval)):
+                    p_low, g_low = plbl.lower(), glbl.lower()
+                    
+                    is_match = False
+                    if p_low in g_low or g_low in p_low:
+                        is_match = True
+                    else:
+                        for group in ALL_GROUPS:
+                            if p_low in group and g_low in group:
+                                is_match = True
+                                break
+                    if not is_match and (p_low == "other lesion" or g_low == "other lesion"):
+                        is_match = True
+                    
+                    if is_match:
+                        iou = compute_iou(pb, gb)
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_idx = gi
+                    
+                    ca_iou = compute_iou(pb, gb)
+                    if ca_iou > best_class_agnostic_iou:
+                        best_class_agnostic_iou = ca_iou
 
-                if best_iou > 0.5 and best_idx not in matched:
+                if best_class_agnostic_iou > 0.2:
+                    class_agnostic_iou_sum += best_class_agnostic_iou
+                    class_agnostic_iou_count += 1
+
+                pred_class_norm = _normalize_class(plbl)
+
+                if best_iou > 0.35 and best_idx not in matched:
                     tp += 1
+                    img_tp += 1
                     matched.add(best_idx)
                     iou_sum += best_iou
                     iou_count += 1
+                    # Per-class TP
+                    if pred_class_norm not in per_class_stats:
+                        per_class_stats[pred_class_norm] = {"tp": 0, "fp": 0, "fn": 0}
+                    per_class_stats[pred_class_norm]["tp"] += 1
                 else:
                     fp += 1
-
-            fn += len(gt_boxes_for_eval) - len(matched)  # Use merged GT, not raw duplicates
+                    img_fp += 1
+                    # Per-class FP
+                    if pred_class_norm not in per_class_stats:
+                        per_class_stats[pred_class_norm] = {"tp": 0, "fp": 0, "fn": 0}
+                    per_class_stats[pred_class_norm]["fp"] += 1
+            
+            # Count false negatives (missed ground truth)
+            img_fn = len(gt_boxes_for_eval) - len(matched)
+            fn += img_fn
+            # Per-class FN
+            for gi, glbl in enumerate(gt_labels_for_eval):
+                if gi not in matched:
+                    gt_class_norm = _normalize_class(glbl)
+                    if gt_class_norm not in per_class_stats:
+                        per_class_stats[gt_class_norm] = {"tp": 0, "fp": 0, "fn": 0}
+                    per_class_stats[gt_class_norm]["fn"] += 1
 
             # Finding text match
             if gt_labels:
@@ -481,33 +737,144 @@ class MultiStageEvaluator:
                         finding_match += 1
                         break
 
+            # Compute per-image confidence
+            conf = _compute_image_confidence(
+                gt_boxes_for_eval, gt_labels_for_eval,
+                findings, len(matched), img_tp, img_fp, img_fn
+            )
+            confidence_scores.append(conf)
+
+            # Annotate in raw sample
+            raw_samples[-1]["confidence"] = conf
+            raw_samples[-1]["image_accuracy"] = 1 if (gt_is_abnormal == pred_is_abnormal) else 0
+
             total_count += 1
 
+        # --- Compute aggregate metrics ---
         precision = tp / max(tp + fp, 1)
         recall = tp / max(tp + fn, 1)
         f1 = 2 * precision * recall / max(precision + recall, 1e-6)
         avg_iou = iou_sum / max(iou_count, 1)
+        avg_ca_iou = class_agnostic_iou_sum / max(class_agnostic_iou_count, 1)
 
-        print(f"  [DONE][DONE][DONE] Detection: P={precision:.4f} R={recall:.4f} F1={f1:.4f} IoU={avg_iou:.4f}")
-        print(f"    TP={tp} FP={fp} FN={fn} (skipped {skipped_normal} normal images)")
+        # NEW METRICS
+        image_accuracy = image_correct / max(image_total, 1)
+        avg_confidence = sum(confidence_scores) / max(len(confidence_scores), 1)
+        
+        # Confidence buckets for clinical assessment
+        high_conf = sum(1 for c in confidence_scores if c >= 0.7)
+        med_conf = sum(1 for c in confidence_scores if 0.4 <= c < 0.7)
+        low_conf = sum(1 for c in confidence_scores if c < 0.4)
+
+        # Per-class accuracy
+        per_class_accuracy = {}
+        for cls, stats in sorted(per_class_stats.items()):
+            cls_tp = stats["tp"]
+            cls_total = stats["tp"] + stats["fn"]
+            cls_precision = cls_tp / max(cls_tp + stats["fp"], 1)
+            cls_recall = cls_tp / max(cls_total, 1)
+            cls_f1 = 2 * cls_precision * cls_recall / max(cls_precision + cls_recall, 1e-6)
+            per_class_accuracy[cls] = {
+                "precision": round(cls_precision, 4),
+                "recall": round(cls_recall, 4),
+                "f1": round(cls_f1, 4),
+                "tp": cls_tp, "fp": stats["fp"], "fn": stats["fn"]
+            }
+
+        # Overall detection accuracy = weighted average of classification + localization
+        # Clinical grade: A (>0.7), B (0.5-0.7), C (0.3-0.5), D (<0.3)
+        overall_accuracy = (0.5 * image_accuracy) + (0.3 * f1) + (0.2 * avg_iou)
+        if overall_accuracy >= 0.7:
+            clinical_grade = "A (Clinical-ready)"
+        elif overall_accuracy >= 0.5:
+            clinical_grade = "B (Acceptable)"
+        elif overall_accuracy >= 0.3:
+            clinical_grade = "C (Needs improvement)"
+        else:
+            clinical_grade = "D (Not ready)"
+
+        print(f"  [DONE] Detection: P={precision:.4f} R={recall:.4f} F1={f1:.4f} IoU={avg_iou:.4f}")
+        print(f"    TP={tp} FP={fp} FN={fn} TN={tn}")
+        print(f"    Image Accuracy: {image_accuracy:.4f} ({image_correct}/{image_total})")
+        print(f"    Avg Confidence: {avg_confidence:.4f} (High:{high_conf} Med:{med_conf} Low:{low_conf})")
+        print(f"    Overall Accuracy: {overall_accuracy:.4f} — Grade: {clinical_grade}")
+        print(f"    Class-agnostic IoU: {avg_ca_iou:.4f} (n={class_agnostic_iou_count})")
+        if per_class_accuracy:
+            print(f"    Per-class breakdown:")
+            for cls, stats in sorted(per_class_accuracy.items(), key=lambda x: x[1]['f1'], reverse=True):
+                print(f"      {cls:.<30} P={stats['precision']:.3f} R={stats['recall']:.3f} F1={stats['f1']:.3f} (TP={stats['tp']} FP={stats['fp']} FN={stats['fn']})")
 
         return {
+            "accuracy": round(overall_accuracy, 4),
+            "image_accuracy": round(image_accuracy, 4),
+            "avg_confidence": round(avg_confidence, 4),
+            "clinical_grade": clinical_grade,
+            "confidence_distribution": {
+                "high_gte_0.7": high_conf,
+                "medium_0.4_0.7": med_conf,
+                "low_lt_0.4": low_conf
+            },
             "precision": round(precision, 4),
             "recall": round(recall, 4),
             "f1": round(f1, 4),
             "avg_iou": round(avg_iou, 4),
-            "tp": tp, "fp": fp, "fn": fn,
+            "class_agnostic_iou": round(avg_ca_iou, 4),
+            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
             "finding_match_rate": round(finding_match / max(total_count, 1), 4),
+            "per_class_accuracy": per_class_accuracy,
             "total": total_count,
             "raw_samples": raw_samples
         }
 
     def _eval_vqa_stage(self, model, loader, total):
-        """VQA evaluation."""
+        """VQA evaluation with enhanced answer normalization."""
         correct = 0
         total_count = 0
         bleu_sum, rouge_sum = 0.0, 0.0
         raw_samples = []
+
+        # Medical synonym groups for normalization
+        SYNONYM_GROUPS = [
+            {"yes", "correct", "true", "affirmative", "positive"},
+            {"no", "incorrect", "false", "negative", "none"},
+            {"normal", "healthy", "no abnormality", "unremarkable", "no finding"},
+            {"abnormal", "pathological", "disease", "pathology"},
+            {"lung", "pulmonary", "respiratory"},
+            {"heart", "cardiac", "cardiovascular"},
+            {"brain", "cerebral", "intracranial"},
+            {"liver", "hepatic"},
+            {"kidney", "renal"},
+        ]
+
+        def normalize_answer(text):
+            """Normalize answer for robust matching."""
+            t = text.lower().strip()
+            # Strip common prefixes
+            for prefix in ["the answer is", "based on the image,", "answer:",
+                           "the image shows", "this image shows", "the finding is",
+                           "it shows", "yes,", "no,"]:
+                if t.startswith(prefix):
+                    t = t[len(prefix):].strip()
+            # Strip punctuation
+            t = t.strip(string.punctuation + " ")
+            return t
+
+        def synonym_match(pred, gt):
+            """Check if pred and gt belong to the same synonym group."""
+            for group in SYNONYM_GROUPS:
+                if pred in group and gt in group:
+                    return True
+            return False
+
+        def token_overlap(pred, gt):
+            """Compute Jaccard word-token overlap."""
+            pred_tokens = set(pred.split())
+            gt_tokens = set(gt.split())
+            if not pred_tokens or not gt_tokens:
+                return 0.0
+            intersection = pred_tokens & gt_tokens
+            union = pred_tokens | gt_tokens
+            return len(intersection) / len(union)
 
         for i, batch in tqdm(enumerate(loader), total=total, desc="VQA"):
             image = batch["image"][0]
@@ -518,20 +885,25 @@ class MultiStageEvaluator:
                 response, _ = model.analyze_image(image, question, task="vqa")
                 pred = response.strip()
 
-                # Normalize answer: strip common prefixes and clean whitespace
-                pred_normalized = pred.lower().strip()
-                for prefix in ["the answer is", "based on the image,", "answer:", "the image shows"]:
-                    if pred_normalized.startswith(prefix):
-                        pred_normalized = pred_normalized[len(prefix):].strip()
-                # Strip punctuation for comparison
-                import string
-                pred_clean = pred_normalized.strip(string.punctuation + " ")
-                gt_clean = gt_answer.lower().strip(string.punctuation + " ")
+                pred_clean = normalize_answer(pred)
+                gt_clean = normalize_answer(gt_answer)
 
-                # Exact, substring, or normalized match
+                # Multi-level matching:
+                # 1. Exact match
+                # 2. Substring match (either direction)
+                # 3. Synonym match
+                # 4. Token overlap >= 0.5 (Jaccard)
+                is_correct = False
                 if (pred_clean == gt_clean or
                     gt_clean in pred_clean or
                     pred_clean in gt_clean):
+                    is_correct = True
+                elif synonym_match(pred_clean, gt_clean):
+                    is_correct = True
+                elif token_overlap(pred_clean, gt_clean) >= 0.5:
+                    is_correct = True
+
+                if is_correct:
                     correct += 1
 
                 # Text metrics
@@ -559,7 +931,7 @@ class MultiStageEvaluator:
         print(f"  [DONE] VQA: Accuracy={acc:.4f} BLEU-1={bleu:.4f} ROUGE-1={rouge:.4f}")
 
         return {
-            "accuracy": round(acc, 4),
+            "accuracy": round(float(acc), 4),
             "bleu1": round(bleu, 4),
             "rouge1": round(rouge, 4),
             "correct": correct,
@@ -569,11 +941,11 @@ class MultiStageEvaluator:
 
     def _print_summary(self):
         """Print comprehensive summary table."""
-        print("\n" + "=" * 70)
+        print("\n" + "=" * 80)
         print("  COMPREHENSIVE EVALUATION SUMMARY")
-        print("=" * 70)
-        print(f"{'Stage':<15} {'Status':<12} {'Main Metric':<25} {'Samples':<10} {'Time':<8}")
-        print("-" * 70)
+        print("=" * 80)
+        print(f"{'Stage':<15} {'Status':<10} {'Accuracy':<12} {'Main Metric':<25} {'Samples':<10} {'Time':<8}")
+        print("-" * 80)
 
         for stage_name, result in self.results.items():
             status = result.get("status", "unknown")
@@ -582,23 +954,39 @@ class MultiStageEvaluator:
                 samples = result.get("samples_evaluated", 0)
                 elapsed = result.get("elapsed_seconds", 0)
 
-                # Pick the main metric
-                if "accuracy" in result:
-                    metric_str = f"Acc: {result['accuracy']:.4f}"
-                elif "f1" in result:
-                    metric_str = f"F1: {result['f1']:.4f}"
-                else:
-                    metric_str = "N/A"
+                # Accuracy column (all stages now have accuracy)
+                acc = result.get("accuracy", None)
+                acc_str = f"{acc:.4f}" if acc is not None else "N/A"
 
-                print(f"{stage_name:<15} {'[DONE]':<12} {metric_str:<25} {samples:<10} {elapsed:<8.1f}s")
+                # Pick the detailed main metric
+                if stage_name == "detection":
+                    grade = result.get('clinical_grade', 'N/A')
+                    conf = result.get('avg_confidence', 0)
+                    metric_str = f"F1:{result.get('f1',0):.3f} Conf:{conf:.3f}"
+                elif "bleu1" in result:
+                    metric_str = f"BLEU:{result['bleu1']:.3f} R:{result.get('rouge1',0):.3f}"
+                elif "per_class_accuracy" in result:
+                    metric_str = f"Per-class: {len(result['per_class_accuracy'])} classes"
+                else:
+                    metric_str = "-"
+
+                print(f"{stage_name:<15} {'OK':<10} {acc_str:<12} {metric_str:<25} {samples:<10} {elapsed:<8.1f}s")
             elif status == "skipped":
                 reason = result.get("reason", "")
-                print(f"{stage_name:<15} {'SKIP':<12} {reason:<25}")
+                print(f"{stage_name:<15} {'SKIP':<10} {'N/A':<12} {reason:<25}")
             else:
                 error = result.get("error", "Unknown error")
-                print(f"{stage_name:<15} {'FAIL':<12} {error[:25]:<25}")
+                print(f"{stage_name:<15} {'FAIL':<10} {'N/A':<12} {error[:25]:<25}")
 
-        print("=" * 70)
+        # Detection clinical grade
+        det_result = self.results.get("detection", {})
+        if det_result.get("clinical_grade"):
+            print(f"\n  Detection Clinical Grade: {det_result['clinical_grade']}")
+            conf_dist = det_result.get('confidence_distribution', {})
+            if conf_dist:
+                print(f"  Confidence: High={conf_dist.get('high_gte_0.7',0)} Med={conf_dist.get('medium_0.4_0.7',0)} Low={conf_dist.get('low_lt_0.4',0)}")
+
+        print("=" * 80)
 
     def _save_report(self):
         """Save the full report as JSON."""

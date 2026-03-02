@@ -24,6 +24,16 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.factory import MedicalDatasetFactory
 
+# Import modality-aware prompts for multi-modal training
+try:
+    from prompts.modality_prompts import (
+        get_detection_prompt, get_screening_prompt, get_vqa_context,
+        get_normal_findings, SUPPORTED_MODALITIES
+    )
+    MODALITY_PROMPTS_AVAILABLE = True
+except ImportError:
+    MODALITY_PROMPTS_AVAILABLE = False
+
 def no_op_check(*args, **kwargs):
     """No-op validation check for pickling safety."""
     return
@@ -137,10 +147,9 @@ class CurriculumConfig:
             learning_rate=1e-5,
             batch_size=1,  # Reduced from 2 to prevent OOM
             prompt_template=(
-                "Analyze this chest X-ray for pathological findings. "
+                "Analyze this medical image for pathological findings. "
                 "For each finding, provide the class name and bounding box coordinates. "
-                "Additionally, provide a comprehensive clinical description of the anomaly, its severity, and its exact anatomical location. "
-                "Output in JSON format: {\"findings\": [{\"class\": \"...\", \"box\": [x1,y1,x2,y2], \"description\": \"...\"}]}"
+                "Output in JSON format: {\"findings\": [{\"class\": \"...\", \"box\": [x1,y1,x2,y2], \"reasoning\": \"...\"}]}"
             ),
             early_stopping=EarlyStoppingConfig(
                 enabled=True,
@@ -419,41 +428,108 @@ class CurriculumTrainer:
         return datasets
     
     def create_prompt(self, sample: Dict, stage_config: StageConfig, image_token: str = "<image>") -> str:
-        """Create training prompt with Gemma chat template."""
+        """Create training prompt with Gemma chat template.
+        
+        Uses modality-aware prompts from modality_prompts.py for multi-modal training.
+        Supports: X-ray, MRI, CT, Ultrasound across screening, detection, VQA tasks.
+        """
         task = stage_config.task
+        modality = sample.get("modality", "xray").lower().strip()
         
         # Base user query part
         if task == "screening":
-            user_query = f"{image_token} {stage_config.prompt_template}"
+            # Use modality-specific screening prompt
+            if MODALITY_PROMPTS_AVAILABLE:
+                screening_prompt = get_screening_prompt(modality)
+            else:
+                screening_prompt = stage_config.prompt_template
+            user_query = f"{image_token} {screening_prompt}"
             target = "HEALTHY" if sample.get("is_healthy", False) else "ABNORMAL"
             
         elif task == "modality":
-            modality = sample.get("modality", "unknown")
+            modality_val = sample.get("modality", "unknown")
             modality_map = {"xray": "X-ray", "ct": "CT", "mri": "MRI", "ultrasound": "Ultrasound"}
-            target = modality_map.get(modality.lower(), modality)
+            target = modality_map.get(modality_val.lower(), modality_val)
             user_query = f"{image_token} {stage_config.prompt_template}"
             
         elif task == "detection":
             boxes = sample.get("boxes", [])
             labels = sample.get("labels", [])
             
-            if not boxes:
-                target_json = json.dumps({"findings": [{"class": "No significant abnormality", "box": [0,0,0,0], "description": "No acute cardiopulmonary abnormality identified. Heart size and mediastinal contour are within normal limits. Lungs are clear bilaterally without focal consolidation, effusion, or pneumothorax."}]})
+            # Use modality-aware detection prompt
+            if MODALITY_PROMPTS_AVAILABLE:
+                detection_prompt = get_detection_prompt(modality)
             else:
+                detection_prompt = stage_config.prompt_template
+            
+            if not boxes:
+                # Use modality-specific normal findings
+                if MODALITY_PROMPTS_AVAILABLE:
+                    normal_findings = get_normal_findings(modality)
+                    target_json = json.dumps(normal_findings)
+                else:
+                    target_json = json.dumps({"findings": [{"class": "No significant abnormality", "box": [0,0,0,0], "reasoning": "No acute abnormality identified."}]})
+            else:
+                # CLASS-SPECIFIC CLINICAL REASONING (matches retrain_detection_optimized.py)
+                CLINICAL_REASONING = {
+                    "aortic enlargement": "Prominent aortic knob with unfolding of the thoracic aorta",
+                    "atelectasis": "Linear opacity suggesting subsegmental atelectasis with volume loss",
+                    "calcification": "Dense calcific focus identified in the specified region",
+                    "cardiomegaly": "Enlarged cardiac silhouette with cardiothoracic ratio exceeding 0.5",
+                    "clavicle fracture": "Cortical disruption and displaced fracture fragment of the clavicle",
+                    "consolidation": "Dense airspace opacity with air bronchograms suggesting consolidation",
+                    "edema": "Bilateral perihilar haziness with interstitial markings suggesting pulmonary edema",
+                    "emphysema": "Hyperinflated lung fields with flattened hemidiaphragms",
+                    "infiltration": "Ill-defined opacity in the lung field suggesting infiltrative process",
+                    "ild": "Bilateral reticular markings with ground-glass opacities suggesting interstitial lung disease",
+                    "lung opacity": "Focal opacity identified in the lung parenchyma",
+                    "nodule/mass": "Well-circumscribed rounded opacity in the lung field",
+                    "mass": "Soft tissue density mass lesion identified in the specified region",
+                    "nodule": "Small rounded opacity less than 3cm in the lung parenchyma",
+                    "pleural effusion": "Blunting of costophrenic angle with meniscus sign suggesting pleural effusion",
+                    "pleural thickening": "Thickening of pleural surfaces along the lateral chest wall",
+                    "pneumothorax": "Visceral pleural line with absent lung markings indicating pneumothorax",
+                    "pulmonary fibrosis": "Bilateral reticular markings with honeycombing pattern at the lung bases",
+                    "rib fracture": "Cortical break identified in the rib with step deformity",
+                    "other lesion": "Focal abnormality identified requiring further clinical correlation",
+                    # MRI-specific
+                    "brain tumor": "Enhancing mass lesion with surrounding vasogenic edema",
+                    "glioma": "Infiltrative intra-axial mass with heterogeneous enhancement",
+                    "meningioma": "Extra-axial dural-based mass with homogeneous enhancement",
+                    "metastasis": "Multiple ring-enhancing lesions at gray-white junction",
+                    "hemorrhage": "Hyperdense/hyperintense focus indicating acute hemorrhage",
+                    "infarction": "Restricted diffusion with cytotoxic edema indicating acute infarct",
+                    "hydrocephalus": "Dilated ventricular system with transependymal edema",
+                    # CT-specific
+                    "tumor": "Enhancing soft tissue mass lesion in the specified region",
+                    "fracture": "Cortical disruption with displacement at the fracture site",
+                    "effusion": "Dependent fluid collection in the pleural/peritoneal space",
+                    "abscess": "Ring-enhancing fluid collection with surrounding inflammation",
+                    # Ultrasound-specific
+                    "benign mass": "Well-defined hypoechoic lesion with smooth margins",
+                    "malignant mass": "Irregular hypoechoic lesion with spiculated margins and posterior shadowing",
+                    "cyst": "Anechoic well-circumscribed lesion with posterior acoustic enhancement",
+                }
                 findings = []
                 for box, label in zip(boxes, labels):
-                    # Add a robust clinical description based on the label
-                    desc = f"Pathological presence of {label} detected in the specified region, indicating an underlying clinical anomaly requiring attention."
-                    findings.append({"class": label, "box": [int(b) for b in box], "description": desc})
+                    label_key = label.lower().strip()
+                    reasoning = CLINICAL_REASONING.get(label_key,
+                        f"Focal abnormality consistent with {label} identified in the specified region")
+                    findings.append({"class": label, "box": [int(b) for b in box], "reasoning": reasoning})
                 target_json = json.dumps({"findings": findings})
             
-            user_query = f"{image_token} {stage_config.prompt_template}"
+            user_query = f"{image_token} {detection_prompt}"
             target = target_json
             
         elif task == "vqa":
             question = sample.get("question", "")
             answer = sample.get("answer", "")
-            user_query = f"{image_token} Question: {question}"
+            # Add modality context for better VQA grounding
+            if MODALITY_PROMPTS_AVAILABLE:
+                context = get_vqa_context(modality)
+                user_query = f"{image_token} {context}Question: {question}"
+            else:
+                user_query = f"{image_token} Question: {question}"
             target = answer
             
         else:
@@ -461,7 +537,6 @@ class CurriculumTrainer:
             target = ""
 
         # Format with Gemma chat template
-        # <start_of_turn>user\n{query}<end_of_turn>\n<start_of_turn>model\n{answer}<end_of_turn>
         full_prompt = f"<start_of_turn>user\n{user_query}<end_of_turn>\n<start_of_turn>model\n{target}<end_of_turn>"
         
         return full_prompt

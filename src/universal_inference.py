@@ -464,12 +464,17 @@ class UniversalMedicalAnalyzer:
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
-                if "findings" in data and isinstance(data["findings"], list):
-                    for i, f in enumerate(data["findings"]):
-                        if i < len(findings) and "class" in f:
-                            findings[i]["class"] = f["class"]
-                            if "confidence" in f:
-                                findings[i]["confidence"] = float(f["confidence"])
+                # Support both 'findings' and 'f'
+                f_list = data.get("findings", data.get("f", []))
+                if isinstance(f_list, list):
+                    for i, f in enumerate(f_list):
+                        # Support 'class' or 'c'
+                        lbl = f.get("class", f.get("c", ""))
+                        if i < len(findings) and lbl:
+                            findings[i]["class"] = lbl
+                            # Support 'confidence'
+                            cf = f.get("confidence", 0.7)
+                            findings[i]["confidence"] = float(cf)
         except:
             pass
 

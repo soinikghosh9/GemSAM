@@ -27,38 +27,58 @@ SUPPORTED_MODALITIES = ["xray", "mri", "ct", "ultrasound"]
 
 MODALITY_DETECTION_PROMPTS = {
     "xray": (
-        "Analyze this chest X-ray for pathological findings. "
-        "For each finding, provide the class name and bounding box coordinates. "
-        "Additionally, provide a comprehensive clinical description of the anomaly, its severity, and its exact anatomical location. "
-        "Output in JSON format: {\"findings\": [{\"class\": \"...\", \"box\": [x1,y1,x2,y2], \"description\": \"...\"}]}"
+        "You are a senior radiologist analyzing this specific chest X-ray.\n"
+        "Task: Disregard generalized templates. Instead, carefully examine the actual image pixels for TRUE visual abnormalities, regions of interest (ROI), and image-specific features.\n\n"
+        "Valid classes to map your findings to: Aortic enlargement, Atelectasis, Calcification, Cardiomegaly, "
+        "Consolidation, Edema, Emphysema, Infiltration, ILD, Lung Opacity, Nodule/Mass, "
+        "Pleural effusion, Pleural thickening, Pneumothorax, Pulmonary fibrosis, Rib fracture, Other lesion.\n\n"
+        "Guidelines:\n"
+        "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
+        "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
+        "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
+        "Output ONLY valid JSON in this exact structure:\n"
+        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
     "mri": (
-        "Analyze this brain MRI for pathological findings. "
-        "Look for: brain tumors (glioma, meningioma, pituitary adenoma), metastases, "
-        "intracranial hemorrhage, white matter lesions, cerebral infarction, hydrocephalus, "
-        "mass effect, midline shift, or any other structural abnormalities. "
-        "For each finding, provide the class name and bounding box coordinates [x1,y1,x2,y2] normalized to 0-1000. "
-        "Additionally, provide a comprehensive clinical description including tumor grade (if applicable), "
-        "location (frontal, temporal, parietal, occipital, cerebellum), and surrounding edema assessment. "
-        'Output in JSON format: {"findings": [{"class": "...", "box": [x1,y1,x2,y2], "description": "..."}]}'
+        "You are a senior neuroradiologist analyzing this specific brain MRI.\n"
+        "Task: Disregard generalized templates. Instead, carefully examine the actual image pixels for TRUE visual abnormalities, regions of interest (ROI), and image-specific features.\n\n"
+        "Valid classes to map your findings to: Brain tumor, Glioma, Meningioma, Metastasis, Hemorrhage, Infarction, "
+        "Hydrocephalus, Mass effect, Midline shift, White matter lesion, Edema, Cyst, Abscess, "
+        "Brain atrophy, Other lesion.\n\n"
+        "Guidelines:\n"
+        "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
+        "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
+        "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
+        "Output ONLY valid JSON in this exact structure:\n"
+        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
     "ct": (
-        "Analyze this CT scan for pathological findings. "
-        "Look for: tumors, masses, hemorrhage (epidural, subdural, intracerebral, subarachnoid), "
-        "fractures, calcifications, abnormal densities, effusions, or structural abnormalities. "
-        "For each finding, provide the class name and bounding box coordinates [x1,y1,x2,y2] normalized to 0-1000. "
-        "Additionally, provide a comprehensive clinical description including Hounsfield unit assessment "
-        "(if relevant), size, and location. "
-        'Output in JSON format: {"findings": [{"class": "...", "box": [x1,y1,x2,y2], "description": "..."}]}'
+        "You are a senior radiologist analyzing this specific CT scan.\n"
+        "Task: Disregard generalized templates. Instead, carefully examine the actual image pixels for TRUE visual abnormalities, regions of interest (ROI), and image-specific features.\n\n"
+        "Valid classes to map your findings to: Tumor, Hemorrhage, Infarction, Fracture, Calcification, Mass, Nodule, "
+        "Consolidation, Effusion, Abscess, Edema, Lytic lesion, Other lesion.\n\n"
+        "Guidelines:\n"
+        "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
+        "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
+        "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
+        "Output ONLY valid JSON in this exact structure:\n"
+        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
     "ultrasound": (
-        "Analyze this ultrasound image for pathological findings. "
-        "Look for: masses (solid vs cystic), abnormal echogenicity patterns, calcifications, "
-        "fluid collections, structural abnormalities, or any suspicious lesions. "
-        "For each finding, provide the class name and bounding box coordinates [x1,y1,x2,y2] normalized to 0-1000. "
-        "Additionally, provide a comprehensive clinical description including echogenicity (hypoechoic, "
-        "hyperechoic, anechoic, mixed), margins (well-defined, irregular), and size estimation. "
-        'Output in JSON format: {"findings": [{"class": "...", "box": [x1,y1,x2,y2], "description": "..."}]}'
+        "You are a senior sonographer analyzing this specific ultrasound image.\n"
+        "Task: Disregard generalized templates. Instead, carefully examine the actual image pixels for TRUE visual abnormalities, regions of interest (ROI), and image-specific features.\n\n"
+        "Valid classes to map your findings to: Benign mass, Malignant mass, Cyst, Calcification, "
+        "Abnormal echogenicity, Fluid collection, Other lesion.\n\n"
+        "Guidelines:\n"
+        "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
+        "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
+        "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
+        "Output ONLY valid JSON in this exact structure:\n"
+        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
 }
 
@@ -69,23 +89,19 @@ MODALITY_DETECTION_PROMPTS = {
 MODALITY_SCREENING_PROMPTS = {
     "xray": (
         "Examine this chest X-ray and determine if it shows any abnormalities. "
-        "Consider cardiac silhouette, lung fields, pleural spaces, bony structures, and soft tissues. "
-        "Respond with 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
     ),
     "mri": (
         "Examine this brain MRI and determine if it shows any abnormalities. "
-        "Consider brain parenchyma, ventricular system, extra-axial spaces, and any focal lesions. "
-        "Respond with 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology such as tumors, lesions, or structural abnormalities."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
     ),
     "ct": (
         "Examine this CT scan and determine if it shows any abnormalities. "
-        "Consider tissue densities, structural integrity, and any focal abnormalities. "
-        "Respond with 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
     ),
     "ultrasound": (
         "Examine this ultrasound image and determine if it shows any abnormalities. "
-        "Consider echogenicity patterns, structural integrity, and any focal lesions. "
-        "Respond with 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
     ),
 }
 
@@ -118,7 +134,7 @@ MODALITY_CLASSES = {
         "Fibrosis",
         "Infiltration",
         "ILD",  # Interstitial Lung Disease
-        "Lung opacity",
+        "Lung Opacity",
         "Mass",
         "Nodule",
         "Pleural effusion",
@@ -181,36 +197,36 @@ MODALITY_NORMAL_FINDINGS = {
         "findings": [{
             "class": "No significant abnormality",
             "box": [0, 0, 0, 0],
-            "description": "No acute cardiopulmonary abnormality identified. "
-                          "Heart size is within normal limits. Lungs are clear bilaterally. "
-                          "No pleural effusion or pneumothorax. Bony structures appear intact."
+            "reasoning": "No acute cardiopulmonary abnormality identified. "
+                        "Heart size is within normal limits. Lungs are clear bilaterally. "
+                        "No pleural effusion or pneumothorax. Bony structures appear intact."
         }]
     },
     "mri": {
         "findings": [{
             "class": "No significant abnormality",
             "box": [0, 0, 0, 0],
-            "description": "No intracranial mass, hemorrhage, or acute infarction identified. "
-                          "Ventricular system is normal in size and configuration. "
-                          "No midline shift or mass effect. Brain parenchyma appears normal."
+            "reasoning": "No intracranial mass, hemorrhage, or acute infarction identified. "
+                        "Ventricular system is normal in size and configuration. "
+                        "No midline shift or mass effect. Brain parenchyma appears normal."
         }]
     },
     "ct": {
         "findings": [{
             "class": "No significant abnormality",
             "box": [0, 0, 0, 0],
-            "description": "No acute intracranial abnormality identified. "
-                          "No evidence of hemorrhage, mass, or midline shift. "
-                          "Ventricles and sulci are within normal limits for age."
+            "reasoning": "No acute intracranial abnormality identified. "
+                        "No evidence of hemorrhage, mass, or midline shift. "
+                        "Ventricles and sulci are within normal limits for age."
         }]
     },
     "ultrasound": {
         "findings": [{
             "class": "No significant abnormality",
             "box": [0, 0, 0, 0],
-            "description": "No focal lesion or mass identified. "
-                          "Normal echogenicity pattern throughout the examined region. "
-                          "No suspicious findings requiring further evaluation."
+            "reasoning": "No focal lesion or mass identified. "
+                        "Normal echogenicity pattern throughout the examined region. "
+                        "No suspicious findings requiring further evaluation."
         }]
     },
 }

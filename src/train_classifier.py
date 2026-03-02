@@ -17,8 +17,9 @@ import numpy as np
 
 def collate_fn_vqa(batch, processor, label_map=None):
     """
-    Collates batch for VQA fine-tuning.
-    Converts tensor labels to text targets if needed.
+    Collates batch for VQA fine-tuning with PROPER PROMPT MASKING.
+    Labels are set to -100 for prompt tokens so the model only learns
+    to predict the answer portion.
     """
     images = []
     texts = []
@@ -38,8 +39,6 @@ def collate_fn_vqa(batch, processor, label_map=None):
                 if len(indices) == 0:
                     target_str = "No Finding"
                 else:
-                    # We need the class names. 
-                    # Assuming we pass label_map (list of names)
                     if label_map:
                         names = [label_map[i] for i in indices]
                         target_str = ", ".join(names)
@@ -47,17 +46,9 @@ def collate_fn_vqa(batch, processor, label_map=None):
                  if label_map:
                      target_str = label_map[label.item()]
                      
-        # Format: <image> detect diseases <bos> Answer
-        # Note: MedGemma/PaliGemma formatting is specific. 
-        # Usually: "<image> prompt \n answer"
         full_text = f"{image_token} {prompt_text} \n {target_str}"
         texts.append(full_text)
 
-    # Tokenizer inputs
-    # Note: Training VLM usually requires inputs["labels"] matching input_ids
-    # We let the processor handle it if possible, or manual.
-    # PaliGemma processor handles images and text.
-    
     inputs = processor(
         text=texts,
         images=images,
@@ -67,6 +58,28 @@ def collate_fn_vqa(batch, processor, label_map=None):
         max_length=512
     )
 
+    # --- PROMPT MASKING ---
+    # Compute prompt length once and cache on processor for efficiency
+    prompt_len = getattr(processor, '_cached_prompt_len', None)
+    if prompt_len is None:
+        # Tokenize just the prompt prefix (without answer) to find its length
+        prompt_only = f"{image_token} {prompt_text} \n "
+        prompt_tokens = processor.tokenizer(prompt_only, add_special_tokens=True)
+        prompt_len = len(prompt_tokens["input_ids"])
+        # Cache for future calls (same prompt_text every time)
+        processor._cached_prompt_len = prompt_len
+
+    # Create labels: input_ids but with prompt positions masked to -100
+    labels = inputs["input_ids"].clone()
+    # Mask prompt prefix (model shouldn't learn to predict known prompt)
+    labels[:, :prompt_len] = -100
+    # Mask padding tokens (pad_token_id → -100)
+    if hasattr(processor, 'tokenizer') and hasattr(processor.tokenizer, 'pad_token_id'):
+        pad_id = processor.tokenizer.pad_token_id
+        if pad_id is not None:
+            labels[labels == pad_id] = -100
+    
+    inputs["labels"] = labels
     return inputs
 
 def train_lora(dataset_name, root_dir, output_dir="checkpoints/lora_adapter", epochs=3, batch_size=4, lr=2e-4):
@@ -83,14 +96,13 @@ def train_lora(dataset_name, root_dir, output_dir="checkpoints/lora_adapter", ep
     model = prepare_model_for_kbit_training(model)
     
     # Target modules: linear layers in attention
-    # For Gemma/PaliGemma: q_proj, k_proj, v_proj, o_proj
     peft_config = LoraConfig(
         r=16,
         lora_alpha=32,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.05,
         bias="none",
-        task_type=TaskType.CAUSAL_LM # or FEATURE_EXTRACTION? MedGemma is CausalLM usually
+        task_type=TaskType.CAUSAL_LM
     )
     
     model = get_peft_model(model, peft_config)
@@ -99,7 +111,6 @@ def train_lora(dataset_name, root_dir, output_dir="checkpoints/lora_adapter", ep
     # 2. Load Dataset
     print(f"Loading Dataset: {dataset_name}")
     factory = MedicalDatasetFactory(root_dir)
-    # Using MedicalDatasetFactory.get_dataset instead of get_loader to build our own balanced loader
     dataset = factory.get_dataset(dataset_name, task="classification", split="train")
     
     # Get Label Map (Class names)
@@ -110,18 +121,14 @@ def train_lora(dataset_name, root_dir, output_dir="checkpoints/lora_adapter", ep
     # Implement Class-Balanced Sampling for NIH (Heavy "No Finding" Skew)
     print("Computing class weights for balanced sampling...")
     if hasattr(dataset, "df") and "Finding Labels" in dataset.df.columns:
-        # NIH Dataset logic
         labels_series = dataset.df["Finding Labels"]
         is_healthy_mask = labels_series.str.contains("No Finding")
         
-        # Calculate weights: minority classes get higher weight
         num_healthy = is_healthy_mask.sum()
         num_disease = len(dataset) - num_healthy
         
         weight_healthy = 1.0 / max(num_healthy, 1)
         weight_disease = 1.0 / max(num_disease, 1)
-        
-        # Give extra weight to diseases
         weight_disease *= 5.0
         
         sample_weights = np.where(is_healthy_mask, weight_healthy, weight_disease)
@@ -154,22 +161,9 @@ def train_lora(dataset_name, root_dir, output_dir="checkpoints/lora_adapter", ep
         for batch in progress:
             batch = {k: v.to(model.device) for k, v in batch.items()}
             
-            # Forward
-            # VLM Causal Loss: labels = input_ids (masked user prompt usually)
-            # Simple approach: Train on everything (Prompt + Answer)
-            # Better approach: Mask prompt.
-            # processor usually handles 'labels' generation if requested? No.
-            
-            # We clone input_ids as labels
-            labels = batch["input_ids"].clone()
-            
-            # TODO: Improve masking. For now, training on full sequence (Prompt+A)
-            # Ideally we mask the tokens corresponding to "<image> detect diseases \n"
-            
-            outputs = model(
-                **batch,
-                labels=labels
-            )
+            # Labels are already pre-masked in collate_fn_vqa
+            # Prompt tokens are -100, padding is -100, only answer tokens have real IDs
+            outputs = model(**batch)
             
             loss = outputs.loss
             loss.backward()
