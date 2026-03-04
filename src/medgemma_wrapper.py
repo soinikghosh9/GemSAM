@@ -645,7 +645,7 @@ class MedGemmaWrapper:
             else:
                 screening_prompt = (
                     "Examine this medical image and determine if it shows any abnormalities. "
-                    "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
+                    "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text.<end_of_turn>"
                 )
             prompt = f"<start_of_turn>user\n{image_token} {screening_prompt}<end_of_turn>\n<start_of_turn>model\n"
 
@@ -756,7 +756,7 @@ class MedGemmaWrapper:
         # The model's choice to output <end_of_turn> for some images is CORRECT behavior.
         if task == "detection":
             generation_config = {
-                "max_new_tokens": 768,       # Increased from 384 for reasoning
+                "max_new_tokens": 384,       # FIX: Reduced from 768 to prevent timeouts during evaluation
                 "do_sample": False,
                 "repetition_penalty": 1.1,   # Lowered from 1.15 to better allow multiple findings of same class
                 "no_repeat_ngram_size": 0,
@@ -766,7 +766,7 @@ class MedGemmaWrapper:
             }
         else:
             generation_config = {
-                "max_new_tokens": 256,       # Shorter for text responses
+                "max_new_tokens": 20,        # Strictly limited for single-word tasks
                 "do_sample": False,          # Greedy decoding (deterministic)
                 "repetition_penalty": 1.2,   # Moderate penalty for text tasks
                 "no_repeat_ngram_size": 3,   # Prevents text repetitions

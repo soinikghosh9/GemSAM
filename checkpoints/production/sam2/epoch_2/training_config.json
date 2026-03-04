@@ -1,6 +1,6 @@
 {
   "data_dir": "medical_data",
-  "dataset": "slake",
+  "dataset": "all",
   "image_size": 1024,
   "sam2_config": "sam2_hiera_t.yaml",
   "checkpoint": "checkpoints/sam2_hiera_tiny.pt",
@@ -12,7 +12,7 @@
     "proj"
   ],
   "epochs": 5,
-  "batch_size": 2,
+  "batch_size": 1,
   "learning_rate": 0.0001,
   "weight_decay": 0.01,
   "gradient_accumulation_steps": 16,
@@ -23,6 +23,6 @@
   "val_every_n_epochs": 1,
   "output_dir": "checkpoints/production/sam2",
   "save_every_n_epochs": 1,
-  "max_samples": 0,
-  "early_stopping": "EarlyStoppingConfig(enabled=True, patience=5, min_delta=0.005, loss_threshold=0.1, dice_threshold=0.9, eval_interval=50)"
+  "max_samples": -1,
+  "early_stopping": "EarlyStoppingConfig(enabled=True, patience=5, min_delta=0.005, loss_threshold=0.02, dice_threshold=0.95, eval_interval=50)"
 }

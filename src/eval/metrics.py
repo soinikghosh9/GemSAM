@@ -423,3 +423,330 @@ class ComprehensiveEvaluator:
             }
 
         return results
+
+
+# =============================================================================
+# STANDARD MEDICAL AI DETECTION METRICS
+# =============================================================================
+
+def compute_map_at_iou(all_predictions, all_ground_truths, iou_threshold=0.50):
+    """
+    Compute Mean Average Precision at a given IoU threshold (mAP@0.5).
+
+    Args:
+        all_predictions: List of dicts per image, each with keys:
+            - 'boxes': list of [x1,y1,x2,y2]
+            - 'scores': list of confidence scores (0-1)
+            - 'labels': list of class labels
+        all_ground_truths: List of dicts per image, each with keys:
+            - 'boxes': list of [x1,y1,x2,y2]
+            - 'labels': list of class labels
+
+    Returns: dict with 'mAP', 'per_class_AP'
+    """
+    # Collect all unique classes
+    all_classes = set()
+    for gt in all_ground_truths:
+        for lbl in gt.get('labels', []):
+            all_classes.add(lbl.lower().strip())
+
+    if not all_classes:
+        return {"mAP": 0.0, "per_class_AP": {}}
+
+    per_class_ap = {}
+
+    for cls in all_classes:
+        # Gather all predictions and GT for this class across all images
+        detections = []  # (score, is_tp)
+        total_gt = 0
+
+        for img_idx, (preds, gts) in enumerate(zip(all_predictions, all_ground_truths)):
+            # Count GT boxes for this class
+            gt_boxes_cls = []
+            for i, lbl in enumerate(gts.get('labels', [])):
+                if lbl.lower().strip() == cls:
+                    gt_boxes_cls.append(gts['boxes'][i])
+                    total_gt += 1
+
+            gt_matched = [False] * len(gt_boxes_cls)
+
+            # Match predictions to GT (sorted by score)
+            pred_indices = []
+            for i, lbl in enumerate(preds.get('labels', [])):
+                if lbl.lower().strip() == cls:
+                    score = preds['scores'][i] if i < len(preds.get('scores', [])) else 0.5
+                    pred_indices.append((score, i))
+
+            pred_indices.sort(key=lambda x: -x[0])  # Descending by score
+
+            for score, pi in pred_indices:
+                pred_box = preds['boxes'][pi]
+                best_iou = 0
+                best_gt_idx = -1
+
+                for gi, gt_box in enumerate(gt_boxes_cls):
+                    if gt_matched[gi]:
+                        continue
+                    iou = compute_iou(pred_box, gt_box)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_gt_idx = gi
+
+                if best_iou >= iou_threshold and best_gt_idx >= 0:
+                    detections.append((score, True))
+                    gt_matched[best_gt_idx] = True
+                else:
+                    detections.append((score, False))
+
+        if total_gt == 0:
+            continue
+
+        # Sort detections by score descending
+        detections.sort(key=lambda x: -x[0])
+
+        # Compute precision-recall curve
+        tp_cumsum = 0
+        fp_cumsum = 0
+        precisions = []
+        recalls = []
+
+        for score, is_tp in detections:
+            if is_tp:
+                tp_cumsum += 1
+            else:
+                fp_cumsum += 1
+            precisions.append(tp_cumsum / (tp_cumsum + fp_cumsum))
+            recalls.append(tp_cumsum / total_gt)
+
+        # Compute AP using all-point interpolation (PASCAL VOC style)
+        ap = 0.0
+        if recalls:
+            # Add sentinel values
+            recalls_interp = [0.0] + recalls + [1.0]
+            precisions_interp = [1.0] + precisions + [0.0]
+
+            # Make precision monotonically decreasing
+            for i in range(len(precisions_interp) - 2, -1, -1):
+                precisions_interp[i] = max(precisions_interp[i], precisions_interp[i + 1])
+
+            # Compute area under curve
+            for i in range(1, len(recalls_interp)):
+                if recalls_interp[i] != recalls_interp[i - 1]:
+                    ap += (recalls_interp[i] - recalls_interp[i - 1]) * precisions_interp[i]
+
+        per_class_ap[cls] = round(float(ap), 4)
+
+    mAP = np.mean(list(per_class_ap.values())) if per_class_ap else 0.0
+
+    return {
+        "mAP": round(float(mAP), 4),
+        "per_class_AP": per_class_ap
+    }
+
+
+def compute_froc(all_predictions, all_ground_truths, iou_threshold=0.50,
+                 fp_rates=(0.5, 1.0, 2.0, 4.0)):
+    """
+    Compute Free-Response ROC (FROC) curve.
+
+    FROC reports sensitivity at specified average FP rates per image.
+    Standard for lesion detection in radiology (e.g., LUNA16 challenge).
+
+    Args:
+        all_predictions: List of dicts per image with 'boxes', 'scores', 'labels'
+        all_ground_truths: List of dicts per image with 'boxes', 'labels'
+        iou_threshold: IoU threshold for matching
+        fp_rates: Tuple of FP/image rates to evaluate at
+
+    Returns: dict with 'sensitivity_at_fp_rates', 'mean_sensitivity'
+    """
+    num_images = len(all_ground_truths)
+    if num_images == 0:
+        return {"sensitivity_at_fp_rates": {}, "mean_sensitivity": 0.0}
+
+    # Collect all detections with scores
+    all_detections = []  # (score, is_tp, image_idx)
+    total_gt = 0
+
+    for img_idx, (preds, gts) in enumerate(zip(all_predictions, all_ground_truths)):
+        gt_boxes = gts.get('boxes', [])
+        total_gt += len(gt_boxes)
+        gt_matched = [False] * len(gt_boxes)
+
+        # Get predictions sorted by score
+        pred_entries = []
+        for i in range(len(preds.get('boxes', []))):
+            score = preds['scores'][i] if i < len(preds.get('scores', [])) else 0.5
+            pred_entries.append((score, i))
+
+        pred_entries.sort(key=lambda x: -x[0])
+
+        for score, pi in pred_entries:
+            pred_box = preds['boxes'][pi]
+            best_iou = 0
+            best_gt_idx = -1
+
+            for gi, gt_box in enumerate(gt_boxes):
+                if gt_matched[gi]:
+                    continue
+                iou = compute_iou(pred_box, gt_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = gi
+
+            if best_iou >= iou_threshold and best_gt_idx >= 0:
+                all_detections.append((score, True, img_idx))
+                gt_matched[best_gt_idx] = True
+            else:
+                all_detections.append((score, False, img_idx))
+
+    if total_gt == 0:
+        return {"sensitivity_at_fp_rates": {str(r): 0.0 for r in fp_rates}, "mean_sensitivity": 0.0}
+
+    # Sort all detections by score descending
+    all_detections.sort(key=lambda x: -x[0])
+
+    # Walk through detections, computing sensitivity at each FP/image rate
+    sensitivity_at = {}
+    tp_count = 0
+    fp_count = 0
+
+    for score, is_tp, img_idx in all_detections:
+        if is_tp:
+            tp_count += 1
+        else:
+            fp_count += 1
+
+        current_fp_rate = fp_count / num_images
+        current_sensitivity = tp_count / total_gt
+
+        for target_fp in fp_rates:
+            key = str(target_fp)
+            if key not in sensitivity_at and current_fp_rate >= target_fp:
+                sensitivity_at[key] = round(current_sensitivity, 4)
+
+    # Fill in any fp_rates not reached
+    final_sensitivity = tp_count / total_gt if total_gt > 0 else 0.0
+    for target_fp in fp_rates:
+        key = str(target_fp)
+        if key not in sensitivity_at:
+            sensitivity_at[key] = round(final_sensitivity, 4)
+
+    mean_sens = np.mean(list(sensitivity_at.values())) if sensitivity_at else 0.0
+
+    return {
+        "sensitivity_at_fp_rates": sensitivity_at,
+        "mean_sensitivity": round(float(mean_sens), 4)
+    }
+
+
+def compute_fp_per_image(total_fp, num_images):
+    """Compute average false positives per image."""
+    if num_images == 0:
+        return 0.0
+    return round(total_fp / num_images, 4)
+
+
+def bootstrap_confidence_interval(metric_values, n_bootstrap=1000, confidence=0.95,
+                                   metric_fn=None, seed=42):
+    """
+    Compute bootstrap confidence interval for a metric.
+
+    Args:
+        metric_values: Array of per-sample metric values (e.g., per-image F1 scores)
+                       OR a tuple of (tp_list, fp_list, fn_list) if metric_fn is provided.
+        n_bootstrap: Number of bootstrap iterations
+        confidence: Confidence level (0.95 = 95% CI)
+        metric_fn: Optional function that computes the metric from resampled data.
+                   If None, simply computes mean of resampled values.
+        seed: Random seed for reproducibility
+
+    Returns: dict with 'mean', 'ci_lower', 'ci_upper', 'std'
+    """
+    rng = np.random.RandomState(seed)
+    metric_values = np.array(metric_values)
+    n = len(metric_values)
+
+    if n == 0:
+        return {"mean": 0.0, "ci_lower": 0.0, "ci_upper": 0.0, "std": 0.0}
+
+    boot_stats = []
+    for _ in range(n_bootstrap):
+        indices = rng.randint(0, n, size=n)
+        sample = metric_values[indices]
+        if metric_fn:
+            stat = metric_fn(sample)
+        else:
+            stat = np.mean(sample)
+        boot_stats.append(stat)
+
+    boot_stats = np.array(boot_stats)
+    alpha = (1 - confidence) / 2
+
+    return {
+        "mean": round(float(np.mean(boot_stats)), 4),
+        "ci_lower": round(float(np.percentile(boot_stats, 100 * alpha)), 4),
+        "ci_upper": round(float(np.percentile(boot_stats, 100 * (1 - alpha))), 4),
+        "std": round(float(np.std(boot_stats)), 4)
+    }
+
+
+def bootstrap_f1_ci(per_image_tp, per_image_fp, per_image_fn, n_bootstrap=1000, seed=42):
+    """
+    Compute bootstrap 95% CI for F1 score from per-image TP/FP/FN counts.
+
+    Args:
+        per_image_tp: list of TP counts per image
+        per_image_fp: list of FP counts per image
+        per_image_fn: list of FN counts per image
+
+    Returns: dict with 'f1_mean', 'f1_ci_lower', 'f1_ci_upper',
+             'precision_mean', 'precision_ci_lower', 'precision_ci_upper',
+             'recall_mean', 'recall_ci_lower', 'recall_ci_upper'
+    """
+    rng = np.random.RandomState(seed)
+    tp_arr = np.array(per_image_tp)
+    fp_arr = np.array(per_image_fp)
+    fn_arr = np.array(per_image_fn)
+    n = len(tp_arr)
+
+    if n == 0:
+        return {
+            "f1_mean": 0.0, "f1_ci_lower": 0.0, "f1_ci_upper": 0.0,
+            "precision_mean": 0.0, "precision_ci_lower": 0.0, "precision_ci_upper": 0.0,
+            "recall_mean": 0.0, "recall_ci_lower": 0.0, "recall_ci_upper": 0.0
+        }
+
+    f1_boots = []
+    prec_boots = []
+    rec_boots = []
+
+    for _ in range(n_bootstrap):
+        indices = rng.randint(0, n, size=n)
+        tp_sum = tp_arr[indices].sum()
+        fp_sum = fp_arr[indices].sum()
+        fn_sum = fn_arr[indices].sum()
+
+        prec = tp_sum / (tp_sum + fp_sum) if (tp_sum + fp_sum) > 0 else 0.0
+        rec = tp_sum / (tp_sum + fn_sum) if (tp_sum + fn_sum) > 0 else 0.0
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+
+        f1_boots.append(f1)
+        prec_boots.append(prec)
+        rec_boots.append(rec)
+
+    f1_boots = np.array(f1_boots)
+    prec_boots = np.array(prec_boots)
+    rec_boots = np.array(rec_boots)
+
+    return {
+        "f1_mean": round(float(np.mean(f1_boots)), 4),
+        "f1_ci_lower": round(float(np.percentile(f1_boots, 2.5)), 4),
+        "f1_ci_upper": round(float(np.percentile(f1_boots, 97.5)), 4),
+        "precision_mean": round(float(np.mean(prec_boots)), 4),
+        "precision_ci_lower": round(float(np.percentile(prec_boots, 2.5)), 4),
+        "precision_ci_upper": round(float(np.percentile(prec_boots, 97.5)), 4),
+        "recall_mean": round(float(np.mean(rec_boots)), 4),
+        "recall_ci_lower": round(float(np.percentile(rec_boots, 2.5)), 4),
+        "recall_ci_upper": round(float(np.percentile(rec_boots, 97.5)), 4)
+    }

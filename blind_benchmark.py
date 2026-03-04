@@ -269,8 +269,9 @@ def benchmark_modality(model, data_dir, max_samples=-1):
 # =====================================================================
 
 def benchmark_detection(model, data_dir, max_samples=200):
-    """Evaluate detection on VinBigData test split."""
+    """Evaluate detection on VinBigData test split with proper box-level evaluation."""
     import csv
+    import re
 
     csv_path = os.path.join(data_dir, "vinbigdata-chest-xray", "test_split.csv")
     if not os.path.exists(csv_path):
@@ -291,19 +292,49 @@ def benchmark_detection(model, data_dir, max_samples=200):
                 annotations[img_id] = []
             annotations[img_id].append(row)
 
-    # Find images with actual annotations
     image_ids = list(annotations.keys())
     random.shuffle(image_ids)
     if max_samples > 0:
         image_ids = image_ids[:max_samples]
     print(f"  Images: {len(image_ids)}")
 
+    # FIX: Box-level evaluation instead of image-level keyword matching
     tp, fp, fn = 0, 0, 0
+    image_correct = 0  # Image-level accuracy (normal vs abnormal)
     total_images = 0
     raw_samples = []
+    iou_threshold = 0.50
+
+    def _compute_iou(boxA, boxB):
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2])
+        yB = min(boxA[3], boxB[3])
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+        return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+
+    def _parse_detection_json(response_text):
+        """Parse detection JSON output, supporting both full and compressed keys."""
+        findings = []
+        try:
+            # Try to find JSON in the response
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                raw_findings = data.get("findings", data.get("f", []))
+                for f in raw_findings:
+                    if isinstance(f, dict):
+                        cls = f.get("class", f.get("c", "unknown"))
+                        box = f.get("box", f.get("b", []))
+                        if cls.lower() not in ("no significant abnormality", "no finding", "normal") and len(box) == 4:
+                            findings.append({"class": cls, "box": [float(x) for x in box]})
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return findings
 
     for idx, img_id in tqdm(enumerate(image_ids), total=len(image_ids), desc="  Detection"):
-        # Find image file
         img_path = None
         for ext in [".png", ".jpg", ".jpeg", ".dicom"]:
             candidate = os.path.join(img_dir, f"{img_id}{ext}")
@@ -314,37 +345,66 @@ def benchmark_detection(model, data_dir, max_samples=200):
         if not img_path:
             continue
 
-        gt_findings = annotations[img_id]
-        gt_has_finding = any(r["class_name"] != "No finding" for r in gt_findings)
+        gt_rows = annotations[img_id]
+        gt_has_finding = any(r["class_name"] != "No finding" for r in gt_rows)
+
+        # Extract GT boxes
+        gt_boxes = []
+        for r in gt_rows:
+            if r["class_name"] != "No finding":
+                try:
+                    box = [float(r["x_min"]), float(r["y_min"]),
+                           float(r["x_max"]), float(r["y_max"])]
+                    gt_boxes.append({"class": r["class_name"], "box": box})
+                except (KeyError, ValueError):
+                    pass
 
         try:
             img = Image.open(img_path).convert("RGB")
             response, _ = model.analyze_image(img, task="detection")
             total_images += 1
 
-            # Parse response for findings
-            resp_lower = response.lower()
-            pred_has_finding = ("finding" in resp_lower and "no finding" not in resp_lower) or \
-                               "abnormal" in resp_lower or \
-                               any(cls in resp_lower for cls in [
-                                   "pleural", "cardiomegaly", "pneumonia", "opacity",
-                                   "effusion", "mass", "nodule", "consolidation",
-                                   "fibrosis", "atelectasis", "edema", "emphysema"
-                               ])
+            # FIX: Parse JSON output and do box-level matching
+            pred_findings = _parse_detection_json(response)
+            pred_has_finding = len(pred_findings) > 0
 
-            if gt_has_finding and pred_has_finding:
-                tp += 1
-            elif gt_has_finding and not pred_has_finding:
-                fn += 1
-            elif not gt_has_finding and pred_has_finding:
-                fp += 1
-            # TN counted implicitly
+            # Image-level accuracy
+            if gt_has_finding == pred_has_finding:
+                image_correct += 1
+
+            # Box-level matching with IoU
+            img_tp, img_fp, img_fn = 0, 0, 0
+            matched_gt = set()
+
+            for pf in pred_findings:
+                best_iou = 0
+                best_gt_idx = -1
+                for gi, gf in enumerate(gt_boxes):
+                    if gi in matched_gt:
+                        continue
+                    iou = _compute_iou(pf["box"], gf["box"])
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_gt_idx = gi
+
+                if best_iou >= iou_threshold and best_gt_idx >= 0:
+                    img_tp += 1
+                    matched_gt.add(best_gt_idx)
+                else:
+                    img_fp += 1
+
+            img_fn = len(gt_boxes) - len(matched_gt)
+            tp += img_tp
+            fp += img_fp
+            fn += img_fn
 
             if idx < 5:
                 raw_samples.append({
                     "image_id": img_id,
                     "gt_has_finding": gt_has_finding,
-                    "gt_classes": [r["class_name"] for r in gt_findings],
+                    "gt_boxes": len(gt_boxes),
+                    "pred_findings": len(pred_findings),
+                    "img_tp": img_tp, "img_fp": img_fp, "img_fn": img_fn,
                     "pred": response[:200]
                 })
         except Exception as e:
@@ -355,15 +415,20 @@ def benchmark_detection(model, data_dir, max_samples=200):
     precision = tp / max(tp + fp, 1)
     recall = tp / max(tp + fn, 1)
     f1 = 2 * precision * recall / max(precision + recall, 1e-8)
+    fp_per_image = fp / max(total_images, 1)
+    image_accuracy = image_correct / max(total_images, 1)
 
-    print(f"  Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}")
-    print(f"  TP={tp} FP={fp} FN={fn} (out of {total_images} images)")
+    print(f"  Box-level: P={precision:.4f} | R={recall:.4f} | F1={f1:.4f}")
+    print(f"  TP={tp} FP={fp} FN={fn} | FP/image={fp_per_image:.2f}")
+    print(f"  Image accuracy: {image_accuracy:.4f} ({image_correct}/{total_images})")
 
     return {
         "precision": round(precision, 4),
         "recall": round(recall, 4),
         "f1": round(f1, 4),
         "tp": tp, "fp": fp, "fn": fn,
+        "fp_per_image": round(fp_per_image, 4),
+        "image_accuracy": round(image_accuracy, 4),
         "total_images": total_images,
         "raw_samples": raw_samples
     }

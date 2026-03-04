@@ -31,7 +31,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.medgemma_wrapper import MedGemmaWrapper
 from src.data.factory import MedicalDatasetFactory
-from src.eval.metrics import compute_iou, compute_text_metrics
+from src.eval.metrics import (
+    compute_iou, compute_text_metrics,
+    compute_map_at_iou, compute_froc, compute_fp_per_image,
+    bootstrap_f1_ci
+)
 
 
 # =====================================================================
@@ -44,7 +48,7 @@ STAGE_CONFIGS = [
         "adapter_dir": "screening",
         "task": "screening",
         "dataset": "kaggle_pneumonia",
-        "split": "train",
+        "split": "test",  # FIX: Use holdout test set, not training data
         "description": "Binary screening: HEALTHY vs ABNORMAL"
     },
     {
@@ -52,12 +56,12 @@ STAGE_CONFIGS = [
         "adapter_dir": "modality",
         "task": "modality",
         "dataset": "brain_tumor_multimodal",
-        "split": "train",
+        "split": "test",  # FIX: Use holdout test set, not training data
         "description": "Imaging modality classification: X-ray, CT, MRI, Ultrasound"
     },
     {
         "name": "detection",
-        "adapter_dir": "detection",  # Use the newly retrained detection adapter
+        "adapter_dir": "detection",
         "task": "detection",
         "dataset": "vindr",
         "split": "test",
@@ -68,7 +72,7 @@ STAGE_CONFIGS = [
         "adapter_dir": "vqa",
         "task": "vqa",
         "dataset": "slake",
-        "split": "train",
+        "split": "test",  # FIX: Use holdout test set, not training data
         "description": "Visual Question Answering"
     }
 ]
@@ -150,38 +154,53 @@ class MultiStageEvaluator:
             self._base_wrapper.load(use_base_model=True)
         else:
             print("  [CACHE] Reusing base model from previous stage")
-            # Unload previous adapter if any
+            # --- ROBUST ADAPTER SWAP: Cleanly delete previous 'default' adapter ---
             try:
                 model = self._base_wrapper.model
-                # If model was wrapped by PeftModel fallback, unwrap it first
-                if hasattr(model, 'base_model') and hasattr(model, 'peft_config'):
-                    from peft import PeftModel
-                    if isinstance(model, PeftModel):
-                        print("  [UNWRAP] Removing PeftModel wrapper from previous stage")
-                        self._base_wrapper.model = model.base_model.model
-                        model = self._base_wrapper.model
-                elif hasattr(model, 'disable_adapter_layers'):
-                    model.disable_adapter_layers()
-                    if hasattr(model, 'delete_adapter'):
-                        try:
-                            model.delete_adapter('default')
-                        except Exception:
-                            pass
+                
+                # 1. If it's a PeftModel wrapper, unwrap it back to the base model
+                # This prevents nesting PeftModel(PeftModel(...)) which causes OOM and warnings
+                from peft import PeftModel
+                if isinstance(model, PeftModel):
+                    print("  [UNWRAP] Resetting PeftModel to base model for fresh adapter load")
+                    # unload() is safe, but base_model.model is the direct path back
+                    self._base_wrapper.model = model.base_model.model
+                    model = self._base_wrapper.model
+                
+                # 2. Even if it's the base model class, it might have been patched by Transformers-PEFT
+                # Attempt to delete 'default' adapter if it exists
+                if hasattr(model, 'delete_adapter'):
+                    try:
+                        model.delete_adapter('default')
+                        print("  [CLEANUP] Deleted existing 'default' adapter")
+                    except Exception:
+                        pass
+                
+                # 3. Aggressive cleanup of residual PEFT attributes that cause load_adapter to fail
+                if hasattr(model, 'peft_config'):
+                    try:
+                        delattr(model, 'peft_config')
+                        print("  [CLEANUP] Removed residual peft_config attribute")
+                    except Exception:
+                        pass
+                
             except Exception as e:
-                print(f"  [WARN] Adapter cleanup: {e}")
+                print(f"  [WARN] Adapter cleanup error: {e}")
         
         wrapper = self._base_wrapper
 
         if os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
             print(f"  Loading adapter: {adapter_path}")
             try:
+                # Use standard load_adapter on the (now clean) base model
                 wrapper.model.load_adapter(adapter_path, adapter_name="default")
                 wrapper.model.set_adapter("default")
             except Exception as e:
                 print(f"  (!) Failed to load adapter via load_adapter: {e}")
                 print(f"  Attempting PeftModel.from_pretrained fallback...")
                 from peft import PeftModel
-                wrapper.model = PeftModel.from_pretrained(wrapper.model, adapter_path)
+                # Fallback: manually wrap with PeftModel (will be unwrapped in next stage)
+                wrapper.model = PeftModel.from_pretrained(wrapper.model, adapter_path, adapter_name="default")
 
             # CRITICAL FIX: Ensure LoRA weights are moved to GPU
             try:
@@ -459,8 +478,16 @@ class MultiStageEvaluator:
         iou_sum, iou_count = 0.0, 0
         class_agnostic_iou_sum, class_agnostic_iou_count = 0.0, 0  # Localization-only metric
         finding_match = 0
+        finding_total = 0  # FIX: Track total GT labels for proper finding_match_rate
         total_count = 0
         raw_samples = []
+
+        # Per-image tracking for mAP, FROC, and bootstrap CI
+        per_image_predictions = []  # List of dicts: {'boxes', 'scores', 'labels'}
+        per_image_ground_truths = []  # List of dicts: {'boxes', 'labels'}
+        per_image_tp = []
+        per_image_fp = []
+        per_image_fn = []
 
         # --- NEW: Per-image accuracy + confidence tracking ---
         image_correct = 0     # Correctly classified normal/abnormal
@@ -470,15 +497,26 @@ class MultiStageEvaluator:
 
         skipped_normal = 0
 
-        # EXPANDED CLASS MATCHING GROUPS (clinical synonyms in radiology)
-        OPACITY_GROUP = {"lung opacity", "consolidation", "infiltration", "pneumonia", "atelectasis", "airspace opacity"}
-        PLEURAL_GROUP = {"pleural thickening", "pleural effusion"}
-        NODULE_GROUP = {"nodule/mass", "nodule", "mass", "calcification", "lung nodule", "mass/nodule"}
-        FIBROSIS_GROUP = {"pulmonary fibrosis", "fibrosis", "ild", "interstitial lung disease", "scarring", "reticular pattern"}
-        CARDIAC_GROUP = {"cardiomegaly", "aortic enlargement", "enlarged heart", "cardiac enlargement"}
+        # CLINICALLY CORRECT CLASS MATCHING GROUPS
+        # FIX: Separated clinically distinct pathologies that were incorrectly grouped
+        OPACITY_GROUP = {"lung opacity", "airspace opacity"}  # Truly equivalent terms only
+        CONSOLIDATION_GROUP = {"consolidation", "pneumonia"}  # Related inflammatory process
+        ATELECTASIS_GROUP = {"atelectasis", "collapse", "lung collapse"}  # Distinct from opacity
+        INFILTRATION_GROUP = {"infiltration", "infiltrate"}  # Distinct radiologic pattern
+        PLEURAL_EFFUSION_GROUP = {"pleural effusion", "hydrothorax"}  # FIX: Separate from thickening
+        PLEURAL_THICKENING_GROUP = {"pleural thickening", "calcified pleura"}  # FIX: Separate from effusion
+        NODULE_GROUP = {"nodule/mass", "nodule", "mass", "lung nodule", "mass/nodule"}
+        CALCIFICATION_GROUP = {"calcification", "calcified nodule"}  # FIX: Separate from nodule/mass
+        FIBROSIS_GROUP = {"pulmonary fibrosis", "fibrosis", "ild", "interstitial lung disease"}
+        CARDIAC_GROUP = {"cardiomegaly", "enlarged heart", "cardiac enlargement"}  # FIX: Removed aortic enlargement
+        AORTIC_GROUP = {"aortic enlargement", "aortic dilatation", "prominent aortic knob"}  # FIX: Separate from cardiomegaly
         EMPHYSEMA_GROUP = {"emphysema", "copd", "hyperinflation", "bullae"}
         FRACTURE_GROUP = {"rib fracture", "clavicle fracture", "fracture", "bone fracture"}
-        ALL_GROUPS = [OPACITY_GROUP, PLEURAL_GROUP, NODULE_GROUP, FIBROSIS_GROUP, CARDIAC_GROUP, EMPHYSEMA_GROUP, FRACTURE_GROUP]
+        ALL_GROUPS = [
+            OPACITY_GROUP, CONSOLIDATION_GROUP, ATELECTASIS_GROUP, INFILTRATION_GROUP,
+            PLEURAL_EFFUSION_GROUP, PLEURAL_THICKENING_GROUP, NODULE_GROUP, CALCIFICATION_GROUP,
+            FIBROSIS_GROUP, CARDIAC_GROUP, AORTIC_GROUP, EMPHYSEMA_GROUP, FRACTURE_GROUP
+        ]
 
         def _normalize_class(label):
             """Normalize class label for per-class tracking."""
@@ -701,7 +739,7 @@ class MultiStageEvaluator:
 
                 pred_class_norm = _normalize_class(plbl)
 
-                if best_iou > 0.35 and best_idx not in matched:
+                if best_iou > 0.50 and best_idx not in matched:  # FIX: mAP@0.5 standard threshold
                     tp += 1
                     img_tp += 1
                     matched.add(best_idx)
@@ -730,12 +768,12 @@ class MultiStageEvaluator:
                         per_class_stats[gt_class_norm] = {"tp": 0, "fp": 0, "fn": 0}
                     per_class_stats[gt_class_norm]["fn"] += 1
 
-            # Finding text match
-            if gt_labels:
-                for gl in gt_labels:
+            # Finding text match — FIX: Count per-label, not per-image
+            if gt_labels_for_eval:
+                for gl in gt_labels_for_eval:
                     if gl.lower() in generated_text.lower():
                         finding_match += 1
-                        break
+                finding_total += len(gt_labels_for_eval)
 
             # Compute per-image confidence
             conf = _compute_image_confidence(
@@ -747,6 +785,23 @@ class MultiStageEvaluator:
             # Annotate in raw sample
             raw_samples[-1]["confidence"] = conf
             raw_samples[-1]["image_accuracy"] = 1 if (gt_is_abnormal == pred_is_abnormal) else 0
+
+            # Track per-image data for mAP/FROC/bootstrap
+            img_pred_boxes = [f.get("box", f.get("b", [])) for f in findings if isinstance(f, dict)]
+            img_pred_labels = [f.get("class", f.get("c", "unknown")) for f in findings if isinstance(f, dict)]
+            img_pred_scores = [f.get("confidence", 0.5) for f in findings if isinstance(f, dict)]
+            per_image_predictions.append({
+                'boxes': img_pred_boxes,
+                'labels': img_pred_labels,
+                'scores': img_pred_scores
+            })
+            per_image_ground_truths.append({
+                'boxes': list(gt_boxes) if not isinstance(gt_boxes, list) else gt_boxes,
+                'labels': list(gt_labels_for_eval) if gt_labels_for_eval else []
+            })
+            per_image_tp.append(img_tp)
+            per_image_fp.append(img_fp)
+            per_image_fn.append(img_fn)
 
             total_count += 1
 
@@ -781,31 +836,39 @@ class MultiStageEvaluator:
                 "tp": cls_tp, "fp": stats["fp"], "fn": stats["fn"]
             }
 
-        # Overall detection accuracy = weighted average of classification + localization
-        # Clinical grade: A (>0.7), B (0.5-0.7), C (0.3-0.5), D (<0.3)
-        overall_accuracy = (0.5 * image_accuracy) + (0.3 * f1) + (0.2 * avg_iou)
-        if overall_accuracy >= 0.7:
+        # FIX: Clinical grade based on F1 alone (primary detection metric)
+        # No misleading composite that masks low F1 with inflated image_accuracy
+        fp_per_image = fp / max(image_total, 1)
+        if f1 >= 0.60:
             clinical_grade = "A (Clinical-ready)"
-        elif overall_accuracy >= 0.5:
+        elif f1 >= 0.40:
             clinical_grade = "B (Acceptable)"
-        elif overall_accuracy >= 0.3:
+        elif f1 >= 0.20:
             clinical_grade = "C (Needs improvement)"
         else:
             clinical_grade = "D (Not ready)"
 
-        print(f"  [DONE] Detection: P={precision:.4f} R={recall:.4f} F1={f1:.4f} IoU={avg_iou:.4f}")
-        print(f"    TP={tp} FP={fp} FN={fn} TN={tn}")
-        print(f"    Image Accuracy: {image_accuracy:.4f} ({image_correct}/{image_total})")
-        print(f"    Avg Confidence: {avg_confidence:.4f} (High:{high_conf} Med:{med_conf} Low:{low_conf})")
-        print(f"    Overall Accuracy: {overall_accuracy:.4f} — Grade: {clinical_grade}")
+        print(f"    FP/image: {fp_per_image:.4f}")
+        print(f"    Clinical Grade: {clinical_grade}")
         print(f"    Class-agnostic IoU: {avg_ca_iou:.4f} (n={class_agnostic_iou_count})")
         if per_class_accuracy:
             print(f"    Per-class breakdown:")
             for cls, stats in sorted(per_class_accuracy.items(), key=lambda x: x[1]['f1'], reverse=True):
                 print(f"      {cls:.<30} P={stats['precision']:.3f} R={stats['recall']:.3f} F1={stats['f1']:.3f} (TP={stats['tp']} FP={stats['fp']} FN={stats['fn']})")
 
+        # Compute advanced metrics: mAP@0.5, FROC, Bootstrap CIs
+        map_result = compute_map_at_iou(per_image_predictions, per_image_ground_truths, iou_threshold=0.50)
+        froc_result = compute_froc(per_image_predictions, per_image_ground_truths, iou_threshold=0.50)
+        bootstrap_ci = bootstrap_f1_ci(per_image_tp, per_image_fp, per_image_fn, n_bootstrap=1000)
+
+        print(f"    mAP@0.5: {map_result['mAP']:.4f}")
+        print(f"    FROC mean sensitivity: {froc_result['mean_sensitivity']:.4f}")
+        print(f"    FROC sensitivity @ FP/img: {froc_result['sensitivity_at_fp_rates']}")
+        print(f"    Bootstrap 95% CI — F1: [{bootstrap_ci['f1_ci_lower']:.4f}, {bootstrap_ci['f1_ci_upper']:.4f}]")
+        print(f"    Bootstrap 95% CI — Precision: [{bootstrap_ci['precision_ci_lower']:.4f}, {bootstrap_ci['precision_ci_upper']:.4f}]")
+        print(f"    Bootstrap 95% CI — Recall: [{bootstrap_ci['recall_ci_lower']:.4f}, {bootstrap_ci['recall_ci_upper']:.4f}]")
+
         return {
-            "accuracy": round(overall_accuracy, 4),
             "image_accuracy": round(image_accuracy, 4),
             "avg_confidence": round(avg_confidence, 4),
             "clinical_grade": clinical_grade,
@@ -820,7 +883,12 @@ class MultiStageEvaluator:
             "avg_iou": round(avg_iou, 4),
             "class_agnostic_iou": round(avg_ca_iou, 4),
             "tp": tp, "fp": fp, "fn": fn, "tn": tn,
-            "finding_match_rate": round(finding_match / max(total_count, 1), 4),
+            "finding_match_rate": round(finding_match / max(finding_total, 1), 4),
+            "fp_per_image": round(fp_per_image, 4),
+            "mAP_at_0.5": map_result["mAP"],
+            "mAP_per_class": map_result["per_class_AP"],
+            "froc": froc_result,
+            "bootstrap_95ci": bootstrap_ci,
             "per_class_accuracy": per_class_accuracy,
             "total": total_count,
             "raw_samples": raw_samples

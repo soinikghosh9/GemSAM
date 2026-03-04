@@ -1,59 +1,174 @@
-(medgamma) PS D:\MedGamma> python src/eval/evaluate_all_stages.py --checkpoint checkpoints/production --stages detection --abnormal_only --max_samples 10
+(medgamma) PS D:\MedGamma> python -m src.eval.evaluate_all_stages --checkpoint checkpoints/production --max_samples 1000
 ============================================================
   MedGamma Multi-Stage Holdout Evaluation
 ============================================================
 Checkpoint: checkpoints/production
-Max Samples Per Stage: 10
+Max Samples Per Stage: 1000
 Device: cuda
-Stages: ['detection']
+Stages: ['screening', 'modality', 'detection', 'vqa']
 
 
 ============================================================
-  STAGE: DETECTION
-  Pathology detection with bounding boxes
-  Adapter: checkpoints/production\final
+  STAGE: SCREENING
+  Binary screening: HEALTHY vs ABNORMAL
+  Adapter: checkpoints/production\screening
 ============================================================
+  [INIT] Loading base MedGemma model (first stage)...
 Loading MedGemma (google/medgemma-1.5-4b-it) on cuda...
 Mode: 4-bit Quantization (GPU)
 The image processor of type `Gemma3ImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`.
-Loading weights: 100%|██████████████████| 883/883 [00:09<00:00, 93.09it/s, Materializing param=model.vision_tower.vision_model.post_layernorm.weight]
+Loading weights: 100%|████████████████████████████████████████████████████████████████████████████| 883/883 [00:04<00:00, 207.25it/s, Materializing param=model.vision_tower.vision_model.post_layernorm.weight]
 Setting up processor and tokens for inference...
 DEBUG: Using tokenizer's boi_token: '<start_of_image>'
 DEBUG: Image token string: '<start_of_image>' (ID from tokenizer: 255999)
 DEBUG: Model's native image_token_index was 262144, updating to 255999 (matching training)
-DEBUG: full_image_sequence uses '<start_of_image>' (ID 255999)
-DEBUG: Expected 256 image tokens, actual count in tokenized sequence: 256
-DEBUG: Monkey-patched _check_special_mm_tokens to bypass validation.
+  > Base Model Requested (Zero-Shot Mode).
 MedGemma loaded successfully.
-  Loading adapter: checkpoints/production\final
+  Loading adapter: checkpoints/production\screening
+Loading weights: 100%|████████████████████████████████████████| 638/638 [00:00<00:00, 1821.38it/s, Materializing param=model.vision_tower.vision_model.encoder.layers.26.self_attn.v_proj.lora_B.default.weight]
+  Model successfully loaded on device: cuda:0
+[TRAIN] Kaggle Pneumonia: Loaded 5216 samples (1341 Normal, 3875 Pneumonia)
+  Evaluating 1000 samples from 'kaggle_pneumonia' (train split)...
+Screening: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1000/1000 [1:08:01<00:00,  4.08s/it]
+  Screening Accuracy: 0.8870 (887/1000)
+
+============================================================
+  STAGE: MODALITY
+  Imaging modality classification: X-ray, CT, MRI, Ultrasound
+  Adapter: checkpoints/production\modality
+============================================================
+  [CACHE] Reusing base model from previous stage
+  [CLEANUP] Deleted existing 'default' adapter
+  Loading adapter: checkpoints/production\modality
+Loading weights: 100%|█████████████████████████████████████████| 638/638 [00:03<00:00, 164.28it/s, Materializing param=model.vision_tower.vision_model.encoder.layers.26.self_attn.v_proj.lora_B.default.weight]
+  Model successfully loaded on device: cuda:0
+[DEBUG] BrainTumorMultimodal: root_dir = medical_data\Brain tumor multimodal image (CT & MRI)
+[DEBUG] BrainTumorMultimodal: search_root = medical_data\Brain tumor multimodal image (CT & MRI)\Dataset (exists: True)
+[DEBUG] BrainTumorMultimodal: search_root contents = ['Brain Tumor CT scan Images', 'Brain Tumor MRI images', 'source.txt']
+[DEBUG] Found modality dir: medical_data\Brain tumor multimodal image (CT & MRI)\Dataset\Brain Tumor CT scan Images
+[DEBUG] Found modality dir: medical_data\Brain tumor multimodal image (CT & MRI)\Dataset\Brain Tumor MRI images
+[TRAIN] Brain Tumor Multimodal: Loaded 7694 samples {'ct': 4618, 'mri': 3076}
+  Evaluating 1000 samples from 'brain_tumor_multimodal' (train split)...
+Modality: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1000/1000 [24:25<00:00,  1.47s/it]
+  [DONE][DONE][DONE] Modality Accuracy: 0.9190
+    ct: 0.8718
+    mri: 0.9973
+
+============================================================
+  STAGE: DETECTION
+  Pathology detection with bounding boxes
+  Adapter: checkpoints/production\detection
+============================================================
+  [CACHE] Reusing base model from previous stage
+  [CLEANUP] Deleted existing 'default' adapter
+  Loading adapter: checkpoints/production\detection
+Loading weights: 100%|█████████████████████████████████████████| 638/638 [00:03<00:00, 169.02it/s, Materializing param=model.vision_tower.vision_model.encoder.layers.26.self_attn.v_proj.lora_B.default.weight]
+  Model successfully loaded on device: cuda:0
 [TEST] Detected preprocessed data in medical_data\vinbigdata-chest-xray\test_448. Using optimized loading.
 [TEST] Loading annotations from medical_data\vinbigdata-chest-xray\test_split.csv
-[TEST] Filtered for abnormal-only samples: 887/3000
 [TEST] Loading metadata from medical_data\vinbigdata-chest-xray\train_meta.csv
-[TEST] Loaded 887 images.
-  Evaluating 10 samples from 'vindr' (test split)...
-Detection:   0%|                                                                                                              | 0/10 [00:00<?, ?it/s]Validated findings: 4 classes
-Detection:  10%|██████████▏                                                                                           | 1/10 [00:30<04:32, 30.31s/it]Validated findings: 4 classes
-Detection:  20%|████████████████████▍                                                                                 | 2/10 [00:59<03:56, 29.59s/it]Validated findings: 4 classes
-Detection:  30%|██████████████████████████████▌                                                                       | 3/10 [01:28<03:25, 29.38s/it]Validated findings: 4 classes
-Detection:  40%|████████████████████████████████████████▊                                                             | 4/10 [01:58<02:57, 29.59s/it]Validated findings: 4 classes
-Detection:  50%|███████████████████████████████████████████████████                                                   | 5/10 [02:27<02:27, 29.48s/it]Validated findings: 4 classes
-Detection:  60%|█████████████████████████████████████████████████████████████▏                                        | 6/10 [02:57<01:58, 29.64s/it]Validated findings: 4 classes
-Detection:  70%|███████████████████████████████████████████████████████████████████████▍                              | 7/10 [03:27<01:29, 29.81s/it]Validated findings: 4 classes
-Detection:  80%|█████████████████████████████████████████████████████████████████████████████████▌                    | 8/10 [03:58<00:59, 29.94s/it]Validated findings: 4 classes
-Detection:  90%|███████████████████████████████████████████████████████████████████████████████████████████▊          | 9/10 [04:27<00:29, 29.81s/it]Validated findings: 4 classes
-Detection: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████| 10/10 [04:57<00:00, 29.71s/it]
-  ✓ Detection: P=0.0000 R=0.0000 F1=0.0000 IoU=0.0000
-    TP=0 FP=40 FN=51 (skipped 0 normal images)
-MedGemma Unloaded.
+[TEST] Loaded 3000 images.
+  Filtering for balanced sampling (70% abnormal, 30% normal)...
+  Dataset has 887 abnormal and 2113 normal samples.
+  Selected 700 abnormal and 300 normal samples.
+  Evaluating 1000 samples from 'vindr' (test split)...
+Detection:   0%|▏                                                                                                                                                           | 1/1000 [00:56<15:38:56, 56.39s/it][STOP] Max time (180.0s) exceeded
+Detection:   0%|▌                                                                                                                                                           | 4/1000 [05:43<21:37:19, 78.15s/it][STOP] Max time (180.0s) exceeded
+Detection:   1%|█▊                                                                                                                                                         | 12/1000 [16:48<18:08:42, 66.12s/it][STOP] Max time (180.0s) exceeded
+Detection:   1%|██▏                                                                                                                                                        | 14/1000 [20:20<21:50:52, 79.77s/it][STOP] Max time (180.0s) exceeded
+Detection:   2%|██▋                                                                                                                                                        | 17/1000 [25:19<23:13:48, 85.08s/it][STOP] Max time (180.0s) exceeded
+Detection:   2%|███▉                                                                                                                                                       | 25/1000 [34:34<15:38:30, 57.75s/it][STOP] Max time (180.0s) exceeded
+Detection:   4%|█████▌                                                                                                                                                     | 36/1000 [47:56<16:45:05, 62.56s/it][STOP] Max time (180.0s) exceeded
+Detection:   4%|██████▏                                                                                                                                                    | 40/1000 [54:21<20:18:40, 76.17s/it][STOP] Max time (180.0s) exceeded
+Detection:   4%|██████▉                                                                                                                                                  | 45/1000 [1:01:45<20:14:35, 76.31s/it][STOP] Max time (180.0s) exceeded
+Detection:   5%|███████▏                                                                                                                                                 | 47/1000 [1:05:43<24:31:12, 92.63s/it][STOP] Max time (180.0s) exceeded
+Detection:   5%|███████▊                                                                                                                                                 | 51/1000 [1:11:09<18:56:49, 71.88s/it][STOP] Max time (180.0s) exceeded
+Detection:   6%|████████▍                                                                                                                                                | 55/1000 [1:16:51<18:29:01, 70.41s/it][STOP] Max time (180.0s) exceeded
+Detection:   6%|████████▌                                                                                                                                               | 56/1000 [1:19:54<27:18:33, 104.15s/it][STOP] Max time (180.0s) exceeded
+Detection:   6%|█████████▍                                                                                                                                               | 62/1000 [1:27:11<15:46:53, 60.57s/it][STOP] Max time (180.0s) exceeded
+Detection:   6%|█████████▋                                                                                                                                               | 63/1000 [1:30:14<25:19:40, 97.31s/it][STOP] Max time (180.0s) exceeded
+Detection:   6%|█████████▉                                                                                                                                              | 65/1000 [1:34:30<28:05:05, 108.13s/it][STOP] Max time (180.0s) exceeded
+Detection:   7%|██████████                                                                                                                                              | 66/1000 [1:37:32<33:49:44, 130.39s/it][STOP] Max time (180.0s) exceeded
+Detection:   7%|██████████▏                                                                                                                                             | 67/1000 [1:40:35<37:51:36, 146.08s/it][STOP] Max time (180.0s) exceeded
+Detection:   7%|██████████▋                                                                                                                                             | 70/1000 [1:45:20<27:05:34, 104.88s/it][STOP] Max time (180.0s) exceeded
+Detection:   8%|████████████                                                                                                                                             | 79/1000 [1:56:17<16:36:16, 64.90s/it][STOP] Max time (180.0s) exceeded
+Detection:   8%|████████████▋                                                                                                                                            | 83/1000 [2:02:35<19:55:58, 78.25s/it][STOP] Max time (180.0s) exceeded
+Detection:   8%|████████████▊                                                                                                                                           | 84/1000 [2:05:37<27:48:00, 109.26s/it][STOP] Max time (180.0s) exceeded
+Detection:   9%|█████████████▌                                                                                                                                           | 89/1000 [2:12:05<17:39:05, 69.75s/it][STOP] Max time (180.0s) exceeded
+Detection:  10%|██████████████▊                                                                                                                                          | 97/1000 [2:21:36<15:48:43, 63.04s/it][STOP] Max time (180.0s) exceeded
+Detection:  10%|███████████████▋                                                                                                                                        | 103/1000 [2:29:16<14:40:08, 58.87s/it][STOP] Max time (180.0s) exceeded
+Detection:  10%|███████████████▊                                                                                                                                        | 104/1000 [2:32:19<23:53:00, 95.96s/it][STOP] Max time (180.0s) exceeded
+Detection:  11%|████████████████                                                                                                                                       | 106/1000 [2:36:11<24:57:50, 100.53s/it][STOP] Max time (180.0s) exceeded
+Detection:  11%|████████████████▌                                                                                                                                       | 109/1000 [2:40:53<21:15:08, 85.87s/it][STOP] Max time (180.0s) exceeded
+Detection:  11%|████████████████▊                                                                                                                                       | 111/1000 [2:44:55<24:15:00, 98.20s/it][STOP] Max time (180.0s) exceeded
+Detection:  12%|██████████████████▍                                                                                                                                     | 121/1000 [2:55:32<12:59:28, 53.21s/it][STOP] Max time (180.0s) exceeded
+Detection:  13%|███████████████████                                                                                                                                    | 126/1000 [3:04:57<25:25:01, 104.69s/it][STOP] Max time (180.0s) exceeded
+Detection:  13%|███████████████████▌                                                                                                                                    | 129/1000 [3:09:46<21:48:06, 90.11s/it][STOP] Max time (180.0s) exceeded
+Detection:  14%|████████████████████▋                                                                                                                                   | 136/1000 [3:19:05<17:12:35, 71.71s/it][STOP] Max time (180.0s) exceeded
+Detection:  14%|████████████████████▉                                                                                                                                   | 138/1000 [3:23:04<21:36:58, 90.28s/it][STOP] Max time (180.0s) exceeded
+Detection:  14%|█████████████████████▍                                                                                                                                  | 141/1000 [3:28:11<21:38:50, 90.72s/it][STOP] Max time (180.0s) exceeded
+Detection:  15%|██████████████████████▎                                                                                                                                 | 147/1000 [3:37:28<16:08:51, 68.15s/it][STOP] Max time (180.0s) exceeded
+Detection:  16%|███████████████████████▋                                                                                                                                | 156/1000 [3:47:49<13:12:31, 56.34s/it][STOP] Max time (180.0s) exceeded
+Detection:  16%|███████████████████████▊                                                                                                                                | 157/1000 [3:50:51<21:59:12, 93.89s/it][STOP] Max time (180.0s) exceeded
+Detection:  18%|███████████████████████████                                                                                                                             | 178/1000 [4:09:57<11:16:41, 49.39s/it][STOP] Max time (180.0s) exceeded
+Detection:  18%|███████████████████████████▉                                                                                                                            | 184/1000 [4:17:15<12:55:51, 57.05s/it][STOP] Max time (180.0s) exceeded
+Detection:  18%|████████████████████████████                                                                                                                            | 185/1000 [4:20:17<21:24:12, 94.54s/it][STOP] Max time (180.0s) exceeded
+Detection:  20%|█████████████████████████████▋                                                                                                                          | 195/1000 [4:30:30<10:49:00, 48.37s/it][STOP] Max time (180.0s) exceeded
+Detection:  20%|█████████████████████████████▉                                                                                                                          | 197/1000 [4:34:32<17:47:06, 79.73s/it][STOP] Max time (180.0s) exceeded
+Detection:  21%|███████████████████████████████▎                                                                                                                        | 206/1000 [4:45:32<14:35:34, 66.16s/it][STOP] Max time (180.0s) exceeded
+Detection:  21%|███████████████████████████████▌                                                                                                                        | 208/1000 [4:49:46<20:18:11, 92.29s/it][STOP] Max time (180.0s) exceeded
+Detection:  21%|████████████████████████████████▍                                                                                                                       | 213/1000 [4:56:20<14:55:02, 68.24s/it][STOP] Max time (180.0s) exceeded
+Detection:  22%|█████████████████████████████████▎                                                                                                                      | 219/1000 [5:03:31<12:16:58, 56.62s/it][STOP] Max time (180.0s) exceeded
+Detection:  22%|█████████████████████████████████▌                                                                                                                      | 221/1000 [5:07:11<16:41:04, 77.10s/it][STOP] Max time (180.0s) exceeded
+Detection:  22%|█████████████████████████████████▌                                                                                                                     | 222/1000 [5:10:12<23:26:24, 108.46s/it][STOP] Max time (180.0s) exceeded
+Detection:  52%|██████████████████████████████████████████████████████████████████████████████▉                                                                          | 516/1000 [8:54:58<4:56:53, 36.81s/it]Warning: Unknown class 'Lung collapse' mapped to 'Other lesion'
+Detection: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1000/1000 [13:29:15<00:00, 48.56s/it]
+  [DONE] Detection: P=0.0703 R=0.0388 F1=0.0500 IoU=0.5188
+    TP=135 FP=1786 FN=3341 TN=168
+    Image Accuracy: 0.7830 (783/1000)
+    Avg Confidence: 0.4498 (High:133 Med:567 Low:300)
+    Overall Accuracy: 0.5103 — Grade: B (Acceptable)
+    Class-agnostic IoU: 0.3860 (n=352)
+    Per-class breakdown:
+      aortic enlargement............ P=0.235 R=0.127 F1=0.165 (TP=116 FP=378 FN=795)
+      fibrosis...................... P=0.029 R=0.015 F1=0.019 (TP=8 FP=264 FN=539)
+      airspace opacity.............. P=0.054 R=0.010 F1=0.017 (TP=5 FP=87 FN=507)
+      pleural effusion.............. P=0.006 R=0.008 F1=0.007 (TP=6 FP=939 FN=763)
+      bullae........................ P=0.000 R=0.000 F1=0.000 (TP=0 FP=9 FN=0)
+      calcification................. P=0.000 R=0.000 F1=0.000 (TP=0 FP=58 FN=425)
+      edema......................... P=0.000 R=0.000 F1=0.000 (TP=0 FP=41 FN=0)
+      other lesion.................. P=0.000 R=0.000 F1=0.000 (TP=0 FP=6 FN=289)
+      pneumothorax.................. P=0.000 R=0.000 F1=0.000 (TP=0 FP=4 FN=23)
 
-======================================================================
+============================================================
+  STAGE: VQA
+  Visual Question Answering
+  Adapter: checkpoints/production\vqa
+============================================================
+  [CACHE] Reusing base model from previous stage
+  [CLEANUP] Deleted existing 'default' adapter
+  Loading adapter: checkpoints/production\vqa
+Loading weights: 100%|████████████████████████████████████████| 638/638 [00:00<00:00, 3456.68it/s, Materializing param=model.vision_tower.vision_model.encoder.layers.26.self_attn.v_proj.lora_B.default.weight]
+  Model successfully loaded on device: cuda:0
+  Evaluating 1000 samples from 'slake' (train split)...
+VQA: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1000/1000 [12:57<00:00,  1.29it/s]
+  [DONE] VQA: Accuracy=0.6360 BLEU-1=0.5630 ROUGE-1=0.5686
+
+================================================================================
   COMPREHENSIVE EVALUATION SUMMARY
-======================================================================
-Stage           Status       Main Metric               Samples    Time
-----------------------------------------------------------------------
-detection       ✓            F1: 0.0000                10         297.1   s
-======================================================================
+================================================================================
+Stage           Status     Accuracy     Main Metric               Samples    Time
+--------------------------------------------------------------------------------
+screening       OK         0.8870       -                         1000       4081.6  s
+modality        OK         0.9190       Per-class: 2 classes      1000       1465.3  s
+detection       OK         0.5103       F1:0.050 Conf:0.450       1000       48555.4 s
+vqa             OK         0.6360       BLEU:0.563 R:0.569        1000       777.6   s
+
+  Detection Clinical Grade: B (Acceptable)
+  Confidence: High=133 Med=567 Low=300
+================================================================================
 
 Full report saved to: outputs\multi_stage_eval\evaluation_report.json
 Raw sample logs saved to: outputs\multi_stage_eval\raw_samples.json
+Unloading MedGemma...
+MedGemma unloaded.

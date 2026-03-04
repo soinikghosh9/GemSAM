@@ -32,8 +32,8 @@
   "rank_pattern": {},
   "revision": null,
   "target_modules": [
-    "qkv",
-    "proj"
+    "proj",
+    "qkv"
   ],
   "target_parameters": null,
   "task_type": null,

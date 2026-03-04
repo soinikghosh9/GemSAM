@@ -21,7 +21,8 @@ class StopStringCriteria(StoppingCriteria):
 
     def __init__(self, tokenizer, stop_strings: list = None, input_len: int = 0):
         self.tokenizer = tokenizer
-        self.stop_strings = stop_strings or ["<end_of_turn>", "```\n\n", "</s>"]
+        # Expanded stop strings for diverse model versions and formats
+        self.stop_strings = stop_strings or ["<end_of_turn>", "```\n\n", "</s>", "<|endoftext|>", "[END]", "\n\n\n"]
         self.input_len = input_len  # Track where prompt ends
         # Pre-encode stop strings for faster matching
         self.stop_token_ids = []

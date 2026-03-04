@@ -50,6 +50,14 @@ demo/examples/*_analyzed.*
 *_analyzed.*
 reports/
 visualizations/
+paper.tex
+logs.txt
+MEMORY.md
+/outputs/
+/results/
+/checkpoints/
+/blind_test_results/
+/eval_results/
 
 # ─── System & IDE ───
 .DS_Store

@@ -113,10 +113,10 @@ class OptimizedTrainingConfig:
     auto_reduce_cache_on_pressure: bool = True  # Reduce cache if RAM low
 
     # Generalization
-    use_augmentation: bool = False  # DISABLED - allows effective caching
+    use_augmentation: bool = True  # FIX: Enable conservative medical augmentation for generalization
     use_mixup: bool = False  # Medical: careful with mixup
     class_balanced: bool = True
-    max_normal_ratio: float = 0.3  # Cap normal at 30%
+    max_normal_ratio: float = 0.25  # FIX: Better align with eval distribution (was 0.3)
 
     # Paths
     output_dir: str = "checkpoints/production/medgemma/detection"
@@ -349,11 +349,11 @@ class PreTokenizedDetectionDataset(Dataset):
                 reasoning = CLINICAL_REASONING.get(label_key, 
                     f"Focal abnormality consistent with {label} identified in the specified region")
                 findings.append({
-                    "class": label,
-                    "box": [int(b) for b in box],  # Coordinates are [x1,y1,x2,y2] from data loader
-                    "reasoning": reasoning,
+                    "c": label,  # FIX: Compressed keys save ~40% tokens
+                    "b": [int(b) for b in box],
+                    "r": reasoning,
                 })
-            target_json = json.dumps({"findings": findings})
+            target_json = json.dumps({"f": findings})  # FIX: Compressed root key
         else:
             # Normal image: use modality-specific clinical language
             if MODALITY_PROMPTS_AVAILABLE:
@@ -361,7 +361,7 @@ class PreTokenizedDetectionDataset(Dataset):
                 target_json = json.dumps(normal_findings)
             else:
                 # Legacy fallback - chest X-ray specific
-                target_json = json.dumps({"findings": [{"class": "No significant abnormality", "box": [0,0,0,0], "reasoning": "No acute cardiopulmonary abnormality identified. Heart size and mediastinal contour are within normal limits. Lungs are clear bilaterally."}]})
+                target_json = json.dumps({"f": [{"c": "No significant abnormality", "b": [0,0,0,0], "r": "No acute cardiopulmonary abnormality identified. Heart size and mediastinal contour are within normal limits. Lungs are clear bilaterally."}]})
 
         # Build full prompt with chat template
         full_prompt = (

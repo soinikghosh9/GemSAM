@@ -381,7 +381,7 @@ class CurriculumTrainer:
                     # Filter to only include images WITH pathological findings
                     abnormal_indices = []
                     normal_count = 0
-                    max_normal_ratio = 0.1  # Allow only 10% normal images
+                    max_normal_ratio = 0.25  # FIX: Increased from 0.10 to better align with 30% eval distribution
 
                     for i in range(len(ds)):
                         try:
@@ -468,7 +468,7 @@ class CurriculumTrainer:
                     normal_findings = get_normal_findings(modality)
                     target_json = json.dumps(normal_findings)
                 else:
-                    target_json = json.dumps({"findings": [{"class": "No significant abnormality", "box": [0,0,0,0], "reasoning": "No acute abnormality identified."}]})
+                    target_json = json.dumps({"f": [{"c": "No significant abnormality", "b": [0,0,0,0], "r": "No acute abnormality identified."}]})  # FIX: Compressed keys
             else:
                 # CLASS-SPECIFIC CLINICAL REASONING (matches retrain_detection_optimized.py)
                 CLINICAL_REASONING = {
@@ -515,8 +515,8 @@ class CurriculumTrainer:
                     label_key = label.lower().strip()
                     reasoning = CLINICAL_REASONING.get(label_key,
                         f"Focal abnormality consistent with {label} identified in the specified region")
-                    findings.append({"class": label, "box": [int(b) for b in box], "reasoning": reasoning})
-                target_json = json.dumps({"findings": findings})
+                    findings.append({"c": label, "b": [int(b) for b in box], "r": reasoning})  # FIX: Compressed keys
+                target_json = json.dumps({"f": findings})  # FIX: Compressed root key
             
             user_query = f"{image_token} {detection_prompt}"
             target = target_json
@@ -609,6 +609,16 @@ class CurriculumTrainer:
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=stage_config.learning_rate
+        )
+
+        # FIX: Add cosine LR scheduler with warmup (was static LR)
+        from transformers import get_cosine_schedule_with_warmup
+        num_training_steps = len(dataloader) * stage_config.epochs
+        num_warmup_steps = int(self.config.warmup_ratio * num_training_steps)
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
         )
         
         total_loss = 0
@@ -816,6 +826,7 @@ class CurriculumTrainer:
                         # Gradient clipping for stability
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                         optimizer.step()
+                        scheduler.step()  # FIX: Step the LR scheduler
                         optimizer.zero_grad()
                         step_count += 1
 

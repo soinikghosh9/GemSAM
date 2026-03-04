@@ -89,19 +89,19 @@ MODALITY_DETECTION_PROMPTS = {
 MODALITY_SCREENING_PROMPTS = {
     "xray": (
         "Examine this chest X-ray and determine if it shows any abnormalities. "
-        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text.<end_of_turn>"
     ),
     "mri": (
         "Examine this brain MRI and determine if it shows any abnormalities. "
-        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text.<end_of_turn>"
     ),
     "ct": (
         "Examine this CT scan and determine if it shows any abnormalities. "
-        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text.<end_of_turn>"
     ),
     "ultrasound": (
         "Examine this ultrasound image and determine if it shows any abnormalities. "
-        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text."
+        "Respond ONLY with the single word 'HEALTHY' if the image appears normal, or 'ABNORMAL' if you detect any pathology. Do not provide any reasoning or extra text.<end_of_turn>"
     ),
 }
 
@@ -239,7 +239,7 @@ MODALITY_DETECTION_CLASSIFICATION_PROMPT = (
     "What imaging modality was used to acquire this medical image? "
     "Analyze the image characteristics (contrast, resolution, anatomical structures visible) "
     "and classify as one of: X-ray, MRI, CT, or Ultrasound. "
-    "Respond with only the modality name."
+    "Respond with only the modality name.<end_of_turn>"
 )
 
 # =============================================================================

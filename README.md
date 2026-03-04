@@ -23,12 +23,13 @@
 |---------|-------------|
 | **Multi-Modal Support** | Chest X-rays, Brain MRI, CT scans, Ultrasound with modality-specific prompts |
 | **Modality-First Pipeline** | Auto-detects imaging modality → selects appropriate clinical vocabulary |
-| **Detection Accuracy + Confidence** | Per-image accuracy, per-class P/R/F1, confidence score (0–1), clinical grade (A–D) |
+| **ROI-Driven Box Refinement** | **[NEW]** SAM2 masks "snap" bounding boxes to exact visual features (Visual Grounding) |
+| **Anti-Memorization** | **[NEW]** Prompts redesigned to force pixel-level analysis over template recall |
+| **Hallucination Interceptor**| **[NEW]** Filters out known training-set coordinate hallucinations from results |
+| **Binary Screening** | **[NEW]** Strict "HEALTHY"/"ABNORMAL" mode to prevent 30s timeouts |
+| **Detection Accuracy** | Per-image accuracy, per-class P/R/F1, confidence score (0–1), clinical grade (A–D) |
 | **VQA with Prompt Masking** | Model learns only answer tokens; multi-level matching (exact, synonym, Jaccard) |
-| **Adapter-Swap Evaluation** | Base model loaded once; LoRA adapters swapped per stage (3× faster eval) |
 | **Enhanced Explainability** | Gradient-weighted attention maps with ROI validation |
-| **Clinical Intelligence** | Image quality assessment, anatomical validation, recommendations |
-| **Precise Segmentation** | SAM2-based pixel-level region of interest delineation |
 | **JSON Robustness** | Depth-clamped brace/bracket counting handles malformed LLM output |
 | **BICUBIC Consistency** | Train/inference resampling aligned (BICUBIC), ~20% preprocessing speedup |
 
@@ -767,3 +768,13 @@ Apache 2.0 - See [LICENSE](LICENSE) for details.
 
 *Last Updated: February 28, 2026*
 *MedGamma Framework Version: 2.2*
+
+### **Anti-Memorization & Precision Engineering (v2.2)**
+
+To achieve clinical-grade reliability, GemSAM v2.2 implements:
+
+*   **ROI-Driven Box Refinement:** SAM2 masks are used to "snap" bounding boxes to literal pixel boundaries (Visual Grounding), ensuring precision.
+*   **Anti-Memorization Prompts:** All detection prompts explicitly command the model to disregard memorized training templates and "prove" findings via direct pixel description.
+*   **Coordinate Filtering (Hallucination Interceptor):** Automatically intercepts and discards known training-set "hallucinated" coordinates (e.g., [738, 459, 861, 521]).
+*   **Binary Screening Mode:** Strict "HEALTHY/ABNORMAL" mode to stop the 30-second timeout failures. 
+*   **Extended Evaluation Thresholds:** Complex JSON generation tasks now allow up to **180 seconds** for thorough processing.
