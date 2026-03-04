@@ -52,6 +52,7 @@ reports/
 visualizations/
 paper.tex
 logs.txt
+MEMORY.md
 /outputs/
 /results/
 /checkpoints/
