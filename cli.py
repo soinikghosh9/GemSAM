@@ -104,7 +104,7 @@ def show_main_menu():
     print(f"  {WHITE}{BOLD}MAIN MENU{RESET}")
     print()
     print(f"  {CYAN}--- PIPELINE ---------------------------------{RESET}")
-    print(f"   {GREEN}1{RESET}   Run Full Pipeline         {DIM}train+eval+blind{RESET}")
+    print(f"   {GREEN}1{RESET}   Run Full Robust Pipeline  {DIM}E2E + persistent log{RESET}")
     print(f"   {GREEN}2{RESET}   Quick Pipeline             {DIM}~1h turbo mode{RESET}")
     print(f"   {GREEN}3{RESET}   Evaluation Only            {DIM}no training{RESET}")
     print()
@@ -171,18 +171,20 @@ def show_settings():
 # ---- Actions ----
 
 def action_full_pipeline():
-    header("FULL PIPELINE")
+    header("FULL ROBUST PIPELINE")
     s = settings
+    print(f"  {YELLOW}NOTE:{RESET} This uses the robust orchestrator with persistent logging.")
+    print(f"        Output is mirrored to {BOLD}pipeline_exec.log{RESET} with fsync.")
+    print(f"        Ideal for long, unattended clinical validation runs.\n")
+    
     run([
-        PYTHON, "run_all.py", "--all",
+        PYTHON, "long_run_pipeline.py",
         "--data-dir", s["data_dir"],
         "--checkpoint-dir", s["checkpoint_dir"],
-        "--disk-cache-dir", s["cache_dir"],
-        "--detection-mode", s["detection_mode"],
-        "--max-eval-samples", str(s["max_eval"]),
-        "--blind-test-samples", str(s["blind_samples"]),
-        "--no-demo",
-    ], "Full Pipeline (train > eval > blind benchmark)")
+        "--cache-dir", s["cache_dir"],
+        "--mode", s["detection_mode"],
+        "--skip-finished"
+    ], "Full Robust E2E Pipeline (fsync logging enabled)")
     pause()
 
 

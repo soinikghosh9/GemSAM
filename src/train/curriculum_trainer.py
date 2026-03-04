@@ -379,36 +379,39 @@ class CurriculumTrainer:
                 # to default to "No significant abnormality" too often
                 if stage_config.task == "detection":
                     # Filter to only include images WITH pathological findings
+                    print(f"  [FAST FILTER] Scanning {dataset_name} for abnormalities...")
                     abnormal_indices = []
-                    normal_count = 0
-                    max_normal_ratio = 0.25  # FIX: Increased from 0.10 to better align with 30% eval distribution
-
-                    for i in range(len(ds)):
-                        try:
-                            sample = ds[i]
-                            boxes = sample.get("boxes", [])
-                            if boxes and len(boxes) > 0:
-                                # Has pathology - always include
+                    
+                    # 1. Try NIH-style fast filter
+                    if hasattr(ds, 'bbox_map') and hasattr(ds, 'image_ids'):
+                        abnormal_indices = [i for i, img_id in enumerate(ds.image_ids) if img_id in ds.bbox_map]
+                    
+                    # 2. Try VinDr-style fast filter
+                    elif hasattr(ds, 'data_map') and hasattr(ds, 'image_ids'):
+                        for i, img_id in enumerate(ds.image_ids):
+                            group = ds.data_map.get_group(img_id)
+                            # Check if any row in the group is NOT "No finding"
+                            if any(row.get('class_name', 'No finding') != 'No finding' for _, row in group.iterrows()):
                                 abnormal_indices.append(i)
-                            else:
-                                # Normal image - include sparingly
-                                normal_count += 1
-                        except:
-                            continue
-
-                    # Add a small portion of normal images (10% of abnormal count)
-                    max_normal = int(len(abnormal_indices) * max_normal_ratio)
-                    normal_indices = []
-                    for i in range(len(ds)):
-                        if len(normal_indices) >= max_normal:
-                            break
-                        try:
+                    
+                    # 3. Fallback to slow path ONLY for small datasets
+                    elif len(ds) < 500:
+                        for i in range(len(ds)):
                             sample = ds[i]
-                            boxes = sample.get("boxes", [])
-                            if not boxes or len(boxes) == 0:
-                                normal_indices.append(i)
-                        except:
-                            continue
+                            if sample.get("boxes"):
+                                abnormal_indices.append(i)
+                    
+                    # 4. Emergency default (don't hang)
+                    else:
+                        print(f"  Warning: {dataset_name} is too large for slow filtering. Using all samples.")
+                        abnormal_indices = list(range(len(ds)))
+
+                    # Collect a representative set of normal indices
+                    max_normal_ratio = 0.25 # Maintain balanced background
+                    max_normal = int(len(abnormal_indices) * max_normal_ratio)
+                    
+                    abnormal_set = set(abnormal_indices)
+                    normal_indices = [i for i in range(len(ds)) if i not in abnormal_set][:max_normal]
 
                     filtered_indices = abnormal_indices + normal_indices
                     print(f"  Detection filter: {len(abnormal_indices)} abnormal + {len(normal_indices)} normal = {len(filtered_indices)} total (was {len(ds)})")

@@ -282,26 +282,44 @@ class PreTokenizedDetectionDataset(Dataset):
         mem_gb = len(self.image_cache) * bytes_per_image / 1024**3 if bytes_per_image > 0 else 0
         print(f"Pre-loading complete in {elapsed:.1f}s ({len(self.image_cache)} images, {mem_gb:.1f}GB cached)")
 
-        # If train_only_cached is enabled, restrict to cached images only (HUGE speedup)
-        if getattr(self.config, 'train_only_cached', False) and len(self.image_cache) < len(self.indices):
-            cached_indices = list(self.image_cache.keys())
-            original_count = len(self.indices)
-            # Update indices to only include cached images
-            self.indices = [self.indices[i] for i in cached_indices]
-            # Rebuild token cache with new indices
-            new_token_cache = {}
-            for new_idx, old_idx in enumerate(cached_indices):
-                if old_idx in self.token_cache:
-                    new_token_cache[new_idx] = self.token_cache[old_idx]
-            self.token_cache = new_token_cache
-            # Rebuild image cache with new indices
-            new_image_cache = {}
-            for new_idx, old_idx in enumerate(cached_indices):
-                if old_idx in self.image_cache:
-                    new_image_cache[new_idx] = self.image_cache[old_idx]
-            self.image_cache = new_image_cache
-            print(f"  [FAST MODE] Training only on {len(self.indices)} cached images (was {original_count})")
-            print(f"  This eliminates ALL slow on-the-fly image loading!")
+        # If train_only_cached is enabled, restrict to cached images (RAM or DISK)
+        if getattr(self.config, 'train_only_cached', False):
+            # Check RAM cache
+            cached_set = set(self.image_cache.keys())
+            
+            # Check Disk cache if enabled
+            disk_cache_dir = getattr(self.config, 'disk_cache_dir', '')
+            if getattr(self.config, 'disk_cache', False) and disk_cache_dir and os.path.exists(disk_cache_dir):
+                # Efficient check for img_*.pt files
+                disk_files = {f for f in os.listdir(disk_cache_dir) if f.startswith('img_') and f.endswith('.pt')}
+                for i in range(len(self.indices)):
+                    if f"img_{i}.pt" in disk_files:
+                        cached_set.add(i)
+            
+            # Now filter if we have fewer cached than total
+            if len(cached_set) < len(self.indices):
+                cached_indices_sorted = sorted(list(cached_set))
+                original_count = len(self.indices)
+                
+                # Update indices
+                self.indices = [self.indices[i] for i in cached_indices_sorted]
+                
+                # Rebuild caches with new mapped indices
+                new_token_cache = {}
+                new_image_cache = {}
+                for new_idx, old_idx in enumerate(cached_indices_sorted):
+                    if old_idx in self.token_cache:
+                        new_token_cache[new_idx] = self.token_cache[old_idx]
+                    if old_idx in self.image_cache:
+                        new_image_cache[new_idx] = self.image_cache[old_idx]
+                
+                self.token_cache = new_token_cache
+                self.image_cache = new_image_cache
+                
+                print(f"  [FAST MODE] Training only on {len(self.indices)} cached images (was {original_count})")
+                print(f"  This eliminates ALL slow on-the-fly image loading!")
+            elif len(cached_set) == len(self.indices):
+                print(f"  [FAST MODE] FULLY CACHED: All {len(self.indices)} images found in RAM/Disk.")
 
     def _tokenize_sample(self, sample: Dict) -> Dict:
         """Tokenize a single sample (called during pre-computation)."""
@@ -439,8 +457,13 @@ class PreTokenizedDetectionDataset(Dataset):
                 try:
                     pixel_values = torch.load(disk_path, weights_only=True)
                     return pixel_values.float() if pixel_values.dtype == torch.float16 else pixel_values
-                except:
-                    pass  # Fall through to load from source
+                except Exception as e:
+                    print(f"  [CACHE CORRUPTED] img_{idx}.pt is bad ({e}), deleting and re-generating...")
+                    try:
+                        os.remove(disk_path)
+                    except:
+                        pass
+                    # Fall through to load from source
 
         # STRATEGY 3: Load from source
         real_idx = self.indices[idx]
@@ -724,10 +747,21 @@ def preprocess_disk_cache(data_dir: str, cache_dir: str, model_id: str, max_samp
     for idx in range(total):
         cache_path = os.path.join(cache_dir, f"img_{idx}.pt")
 
-        # Skip if already cached
+        # Verify existing file integrity
         if os.path.exists(cache_path):
-            skipped += 1
-            continue
+            try:
+                # Try to load (fast check with weights_only)
+                torch.load(cache_path, weights_only=True)
+                skipped += 1
+                continue
+            except Exception as e:
+                # Corrupted file! Delete it and let the loop re-create it.
+                print(f"  [REPAIR] Core error detected on {cache_path}: {e}")
+                print(f"  Deleting corrupted cache file and re-processing...")
+                try:
+                    os.remove(cache_path)
+                except:
+                    pass
 
         try:
             sample = dataset[idx]
@@ -760,6 +794,8 @@ def preprocess_disk_cache(data_dir: str, cache_dir: str, model_id: str, max_samp
 
         except Exception as e:
             print(f"  Error processing {idx}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     elapsed = time.time() - start
@@ -1174,18 +1210,20 @@ def main():
     actual_dataset_size = len(optimized_dataset)
     print(f"  Actual training samples: {actual_dataset_size}")
 
-    # Create balanced sampler (only if NOT using train_only_cached, since filtering already happened)
-    if config.class_balanced and not args.quick and not getattr(config, 'train_only_cached', False):
-        # Use original indices for sampler
-        sampler = create_balanced_sampler(base_dataset, indices, config.max_normal_ratio)
+    # Create balanced sampler (Always use for full training, even if cached)
+    if config.class_balanced and not args.quick:
+        # Important: use the actual indices in the optimized_dataset
+        # (These are already filtered if train_only_cached was used)
+        training_indices = optimized_dataset.indices
+        sampler = create_balanced_sampler(base_dataset, training_indices, config.max_normal_ratio)
         shuffle = False
+        print(f"  [BALANCED] Using class-balanced sampler on {len(training_indices)} samples")
     else:
-        # When train_only_cached is True, just use simple shuffling
-        # The dataset is already filtered to cached images
+        # When not balancing, just use simple shuffling
         sampler = None
         shuffle = True
         if getattr(config, 'train_only_cached', False):
-            print(f"  [FAST MODE] Using simple shuffle (dataset already filtered)")
+            print(f"  [FAST MODE] Using simple shuffle (no additional balancing requested)")
 
     # Create dataloader
     dataloader = DataLoader(
