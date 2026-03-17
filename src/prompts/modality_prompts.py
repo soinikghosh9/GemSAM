@@ -36,8 +36,8 @@ MODALITY_DETECTION_PROMPTS = {
         "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
         "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
         "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
-        "Output ONLY valid JSON in this exact structure:\n"
-        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Output ONLY valid JSON with compressed keys:\n"
+        "{\"f\": [{\"c\": \"<pathology>\", \"b\": [x1, y1, x2, y2], \"r\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
         "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
     "mri": (
@@ -50,8 +50,8 @@ MODALITY_DETECTION_PROMPTS = {
         "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
         "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
         "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
-        "Output ONLY valid JSON in this exact structure:\n"
-        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Output ONLY valid JSON with compressed keys:\n"
+        "{\"f\": [{\"c\": \"<pathology>\", \"b\": [x1, y1, x2, y2], \"r\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
         "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
     "ct": (
@@ -63,8 +63,8 @@ MODALITY_DETECTION_PROMPTS = {
         "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
         "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
         "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
-        "Output ONLY valid JSON in this exact structure:\n"
-        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Output ONLY valid JSON with compressed keys:\n"
+        "{\"f\": [{\"c\": \"<pathology>\", \"b\": [x1, y1, x2, y2], \"r\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
         "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
     "ultrasound": (
@@ -76,8 +76,8 @@ MODALITY_DETECTION_PROMPTS = {
         "- Do not hallucinate. Prove what you see by describing exactly what the visual pixels show in THIS specific image.\n"
         "- Provide precise bounding box coordinates that tightly wrap the actual ROI in the image.\n"
         "- If the image is healthy, return class 'No significant abnormality' with box [0,0,0,0].\n\n"
-        "Output ONLY valid JSON in this exact structure:\n"
-        "{\"findings\": [{\"class\": \"<pathology>\", \"box\": [x1, y1, x2, y2], \"reasoning\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
+        "Output ONLY valid JSON with compressed keys:\n"
+        "{\"f\": [{\"c\": \"<pathology>\", \"b\": [x1, y1, x2, y2], \"r\": \"<describe the exact visual features/pixels you see in this image>\"}]}\n\n"
         "Coordinate system: [x1, y1, x2, y2] in 0-1000 scale where (0,0) is top-left corner.\n"
     ),
 }
@@ -194,37 +194,37 @@ MODALITY_CLASSES = {
 
 MODALITY_NORMAL_FINDINGS = {
     "xray": {
-        "findings": [{
-            "class": "No significant abnormality",
-            "box": [0, 0, 0, 0],
-            "reasoning": "No acute cardiopulmonary abnormality identified. "
+        "f": [{
+            "c": "No significant abnormality",
+            "b": [0, 0, 0, 0],
+            "r": "No acute cardiopulmonary abnormality identified. "
                         "Heart size is within normal limits. Lungs are clear bilaterally. "
                         "No pleural effusion or pneumothorax. Bony structures appear intact."
         }]
     },
     "mri": {
-        "findings": [{
-            "class": "No significant abnormality",
-            "box": [0, 0, 0, 0],
-            "reasoning": "No intracranial mass, hemorrhage, or acute infarction identified. "
+        "f": [{
+            "c": "No significant abnormality",
+            "b": [0, 0, 0, 0],
+            "r": "No intracranial mass, hemorrhage, or acute infarction identified. "
                         "Ventricular system is normal in size and configuration. "
                         "No midline shift or mass effect. Brain parenchyma appears normal."
         }]
     },
     "ct": {
-        "findings": [{
-            "class": "No significant abnormality",
-            "box": [0, 0, 0, 0],
-            "reasoning": "No acute intracranial abnormality identified. "
+        "f": [{
+            "c": "No significant abnormality",
+            "b": [0, 0, 0, 0],
+            "r": "No acute intracranial abnormality identified. "
                         "No evidence of hemorrhage, mass, or midline shift. "
                         "Ventricles and sulci are within normal limits for age."
         }]
     },
     "ultrasound": {
-        "findings": [{
-            "class": "No significant abnormality",
-            "box": [0, 0, 0, 0],
-            "reasoning": "No focal lesion or mass identified. "
+        "f": [{
+            "c": "No significant abnormality",
+            "b": [0, 0, 0, 0],
+            "r": "No focal lesion or mass identified. "
                         "Normal echogenicity pattern throughout the examined region. "
                         "No suspicious findings requiring further evaluation."
         }]

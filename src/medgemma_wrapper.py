@@ -954,10 +954,10 @@ class MedGemmaWrapper:
                 normal_report = json.dumps(normal_findings, indent=2)
             else:
                 # Legacy fallback - chest X-ray specific
-                normal_report = json.dumps({"findings": [{
-                    "class": "No significant abnormality",
-                    "box": [0, 0, 0, 0],
-                    "description": (
+                normal_report = json.dumps({"f": [{
+                    "c": "No significant abnormality",
+                    "b": [0, 0, 0, 0],
+                    "d": (
                         "No acute cardiopulmonary abnormality identified. "
                         "Heart size and mediastinal contour are within normal limits. "
                         "Lungs are clear bilaterally without focal consolidation, effusion, or pneumothorax. "
