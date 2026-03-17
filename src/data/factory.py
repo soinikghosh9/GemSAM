@@ -971,7 +971,8 @@ class BUSIDataset(Dataset):
             "class_idx": sample["class_idx"],
             "mask": torch.from_numpy(combined_mask).unsqueeze(0) if combined_mask is not None else None,
             "image_path": sample["image_path"],
-            "orig_size": orig_size
+            "orig_size": orig_size,
+            "modality": "ultrasound"
         }
 
         return result

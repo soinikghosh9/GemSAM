@@ -121,7 +121,7 @@ class CurriculumConfig:
         ),
         StageConfig(
             name="modality",
-            datasets=["brain_tumor_multimodal", "slake"],
+            datasets=["kaggle_pneumonia", "brain_tumor_multimodal", "slake", "busi"],
             task="modality",
             epochs=2,
             learning_rate=2e-5,
