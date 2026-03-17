@@ -720,11 +720,19 @@ def preprocess_disk_cache(data_dir: str, cache_dir: str, model_id: str, max_samp
         except AttributeError:
             pass
 
-    # Load processor
+    # Load processor (SSL-resilient: try local cache first, then online)
     print("\n[1/3] Loading processor...")
-    processor = AutoProcessor.from_pretrained(
-        model_id, token=hf_token, trust_remote_code=True
-    )
+    try:
+        processor = AutoProcessor.from_pretrained(
+            model_id, token=hf_token, trust_remote_code=True,
+            local_files_only=True  # Use local HF cache (avoids SSL failures after long runs)
+        )
+        print("  Loaded processor from local cache.")
+    except Exception:
+        print("  Local cache miss, downloading from HuggingFace Hub...")
+        processor = AutoProcessor.from_pretrained(
+            model_id, token=hf_token, trust_remote_code=True
+        )
 
     # Load dataset
     print("\n[2/3] Loading dataset...")

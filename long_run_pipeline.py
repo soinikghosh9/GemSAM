@@ -69,6 +69,11 @@ def main():
     # Set up persistent logging (fsync-enabled)
     setup_persistent_logging(args.log_path)
     
+    # CRITICAL: Set offline mode to prevent SSL failures during long unattended runs.
+    # The model is already cached locally after the first run.
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    
     print(f"MedGamma E2E Pipeline Orchestrator")
     print(f"Configuration:")
     print(f"  - Data Dir:       {args.data_dir}")
