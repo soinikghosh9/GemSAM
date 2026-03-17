@@ -832,6 +832,11 @@ class BrainTumorMultimodalLoader(Dataset):
                                 })
                     break  # Found this modality, no need to check other names
         
+        # Shuffle before split so we don't end up with only MRI in the test split
+        import random
+        random.seed(42)  # Reproducible split
+        random.shuffle(self.samples)
+
         # Split: 80/20
         cutoff = int(len(self.samples) * 0.8)
         if split == "train":
